@@ -1,0 +1,115 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# CloudFront front-door keepalive — REQUIRED when using the opt-in CloudFront
+# path (docs/design-cloudfront-frontdoor.md). It holds the `alb-internal` Ingress
+# group non-empty so EKS Auto Mode never destroys+recreates the internal ALB with
+# a new ARN (which would silently break the front door — a VPC Origin can't be
+# updated while attached to a distribution).
+#
+# Apply ONCE per cluster:  kubectl apply -f charts/preview-env/cloudfront-keepalive.yaml
+# Do NOT delete it while the CloudFront front door is in use. The PodDisruptionBudget
+# below keeps a node drain from evicting the last replica and emptying the group.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: preview-keepalive
+  labels:
+    app.kubernetes.io/part-of: preview-platform
+    preview.pr-preview/keepalive: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keepalive
+  namespace: preview-keepalive
+  labels: { app: keepalive }
+spec:
+  replicas: 2   # >1 so a single node drain never empties the ingress group
+  selector: { matchLabels: { app: keepalive } }
+  template:
+    metadata: { labels: { app: keepalive } }
+    spec:
+      # No API access needed — don't mount a token (CKV_K8S_38).
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001        # high UID avoids host-user collision (CKV_K8S_40)
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: nginx
+          image: public.ecr.aws/nginx/nginx:1.27-alpine
+          imagePullPolicy: Always   # CKV_K8S_15
+          ports: [{ containerPort: 8080 }]
+          # It only holds the ingress group; tiny fixed footprint (CKV_K8S_10-13).
+          resources:
+            requests: { cpu: "10m", memory: "16Mi" }
+            limits:   { cpu: "50m", memory: "32Mi" }
+          # Probes on the /keepalive endpoint it serves (CKV_K8S_8, CKV_K8S_9).
+          readinessProbe:
+            httpGet: { path: /keepalive, port: 8080 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /keepalive, port: 8080 }
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: cache, mountPath: /var/cache/nginx }
+            - { name: run, mountPath: /var/run }
+            - { name: conf, mountPath: /etc/nginx/conf.d }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: cache, emptyDir: {} }
+        - { name: run, emptyDir: {} }
+        # minimal nginx listening on 8080 (non-root) serving 200 on /keepalive
+        - name: conf
+          configMap: { name: keepalive-nginx }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: keepalive-nginx, namespace: preview-keepalive }
+data:
+  default.conf: |
+    server {
+      listen 8080;
+      location /keepalive { return 200 "ok\n"; }
+      location / { return 404; }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: keepalive, namespace: preview-keepalive }
+spec:
+  selector: { app: keepalive }
+  ports: [{ port: 80, targetPort: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keepalive
+  namespace: preview-keepalive
+  annotations:
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /keepalive
+spec:
+  ingressClassName: alb-internal
+  rules:
+    - http:
+        paths:
+          - path: /keepalive
+            pathType: Prefix
+            backend: { service: { name: keepalive, port: { number: 80 } } }
+---
+# Keeps a node drain from evicting the last replica → the group never empties.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: keepalive, namespace: preview-keepalive }
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app: keepalive } }

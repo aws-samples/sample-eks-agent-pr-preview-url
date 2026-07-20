@@ -1,0 +1,136 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# Default values for a Preview Environment.
+# One Helm release == one Pull Request's preview (namespace pr-<n>).
+
+# PR identity — always overridden by the workflow.
+prNumber: "0"
+# Short commit SHA of the deployment. Enables the per-commit immutable host
+# (host mode): pr-<n>-<commitSha>.<baseDomain>. Blank = branch URL only.
+commitSha: ""
+
+image:
+  repository: pr-preview/app
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicas: 1
+
+# Pod security context. The Next.js image runs as the `node` user = UID/GID 1000.
+securityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+
+# --- Routing -----------------------------------------------------
+routing:
+  # "path"  -> http://<alb-or-ingress-host>/pr-<n>/   (basePath baked; no DNS)
+  # "host"  -> http://pr-<n>.<baseDomain>/             (image reuse; needs DNS+TLS)
+  mode: path
+  # host mode:
+  baseDomain: preview.example.com
+  # path mode:
+  pathHost: ""        # optional fixed host for the shared ingress (blank = any host)
+  # IngressClass that fronts the shared ALB (EKS Auto Mode) or ingress-nginx (kind).
+  ingressClassName: alb
+  # Extra annotations merged onto the Ingress (e.g. ALB scheme, healthcheck path,
+  # or nginx rewrite-target for local path mode).
+  annotations: {}
+
+# --- Optional HTTP Basic Auth (app-layer) -----------------------
+# Password-protect the preview at the app (Next.js middleware). Enforced in the
+# pod, so it works behind any ingress (ALB or nginx) regardless of routing mode.
+# /api/health is always exempt so the readiness gate keeps working.
+# Public-by-default is preserved; opt-in per deployment.
+basicAuth:
+  enabled: false
+  # k8s Secret holding base64("user:pass") under `secretKey`. Defaults to
+  # "<release>-basic-auth" / "credentials" when not set.
+  secretName: ""
+  secretKey: credentials
+
+# --- Preview access protection -----------------------------------
+# Optional auth in front of the preview (hosted-PaaS-style deployment protection).
+# Public-by-default is preserved; this is per-deployment opt-in.
+protect:
+  enabled: false
+  # OIDC config for the ALB authenticate-oidc action (only used when enabled).
+  oidc:
+    issuer: ""
+    authorizationEndpoint: ""
+    tokenEndpoint: ""
+    userInfoEndpoint: ""
+    # Name of a k8s Secret in the namespace holding clientId + clientSecret.
+    secretName: preview-oidc
+
+service:
+  port: 80
+  targetPort: 3000
+
+# --- Workload ---------------------------------------------------------------
+resources:
+  requests:
+    cpu: 100m
+    memory: 192Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+# Simulated slow boot for readiness-gate testing (0 = off).
+bootDelayMs: 0
+
+# --- Per-PR namespace guardrails ---------------------------------
+# Bound the blast radius of one preview so a runaway PR can't starve the cluster
+# or reach things it shouldn't.
+guardrails:
+  resourceQuota:
+    enabled: true
+    hardCpu: "2"          # total requests/limits ceiling for the namespace
+    hardMemory: 1Gi
+    maxPods: 6
+  limitRange:
+    enabled: true
+    defaultCpu: 250m      # applied to containers that omit limits
+    defaultMemory: 256Mi
+    defaultRequestCpu: 100m
+    defaultRequestMemory: 128Mi
+  networkPolicy:
+    enabled: true
+    # Default-deny ingress except from the ingress controller; egress limited to
+    # DNS + the shared Aurora port. dbPort/dnsPort kept configurable.
+    dbPort: 5432
+    # Namespaces allowed to send ingress to the preview pod (the ingress
+    # controller / ALB target-registration lives here). Kept to the controller
+    # namespaces ONLY — deliberately NOT the shared `part-of: preview-platform`
+    # label, which every preview carries and would allow cross-preview pod
+    # traffic (no tenant isolation). Add your controller's namespace if different.
+    ingressNamespaces: ["kube-system", "ingress-nginx"]
+    # Destination CIDR the DB port may egress to. Default 0.0.0.0/0 preserves the
+    # prior behavior; set to your Aurora/subnet CIDR (e.g. the VPC 10.20.0.0/16)
+    # to stop a compromised preview reaching arbitrary hosts on the DB port.
+    dbEgressCidr: "0.0.0.0/0"
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 0       # single-replica previews: don't block node drains
+
+# --- Preview Scope: secrets --------------------------------------
+externalSecret:
+  # When true, render an ExternalSecret (requires ESO + a ClusterSecretStore).
+  enabled: false
+  storeRef:
+    name: aws-secrets-manager
+    kind: ClusterSecretStore
+  # Secrets Manager key holding the shared-sandbox (Aurora) connection string.
+  remoteKey: pr-preview/preview/database-url
+  remoteProperty: DATABASE_URL
+
+# Fallback for local/kind where ESO is absent: inline (non-prod) DB URL.
+# Leave blank to run the app with DB unconfigured (diagnostic page shows it).
+databaseUrlInline: ""
+
+# Arbitrary non-secret env passed through to the pod.
+extraEnv: []
+#  - name: NEXT_PUBLIC_APP_ENV
+#    value: preview
+
+# Standard labels applied to every object (drive the teardown sweep).
+commonLabels: {}

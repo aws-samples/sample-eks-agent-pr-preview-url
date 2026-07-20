@@ -1,0 +1,54 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# Shared ALB IngressClass for EKS Auto Mode.
+# Applied ONCE per cluster (not per-PR). Auto Mode's built-in controller
+# (ingressClassName -> eks.amazonaws.com/v1 IngressClassParams) provisions and
+# manages the ALB. `group.name` makes every preview Ingress share ONE ALB.
+apiVersion: eks.amazonaws.com/v1
+kind: IngressClassParams
+metadata:
+  name: alb
+spec:
+  scheme: internet-facing
+  group:
+    name: pr-preview
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: alb
+  labels:
+    app.kubernetes.io/part-of: preview-platform
+spec:
+  controller: eks.amazonaws.com/alb
+  parameters:
+    apiGroup: eks.amazonaws.com
+    kind: IngressClassParams
+    name: alb
+---
+# OPT-IN: private ALB for the CloudFront front-door (docs/design-cloudfront-frontdoor.md).
+# scheme:internal → the ALB lives in private subnets and is NOT internet-reachable;
+# CloudFront reaches it via a VPC Origin. Previews served through CloudFront use
+# ingressClassName: alb-internal. inboundCIDRs can further restrict to the
+# CloudFront origin-facing prefix-list ranges (Auto Mode has no securityGroups field).
+apiVersion: eks.amazonaws.com/v1
+kind: IngressClassParams
+metadata:
+  name: alb-internal
+spec:
+  scheme: internal
+  group:
+    name: pr-preview-internal
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: alb-internal
+  labels:
+    app.kubernetes.io/part-of: preview-platform
+spec:
+  controller: eks.amazonaws.com/alb
+  parameters:
+    apiGroup: eks.amazonaws.com
+    kind: IngressClassParams
+    name: alb-internal

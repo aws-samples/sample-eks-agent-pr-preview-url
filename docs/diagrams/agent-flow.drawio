@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="30.3.14">
+  <diagram name="Agent Flow" id="agent-flow">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1650" pageHeight="1150" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title -->
+        <mxCell id="title" value="End-to-end: a coding agent&#8217;s PR &#8594; a testable preview URL" style="text;html=1;align=left;verticalAlign=middle;fontSize=20;fontStyle=1;fontColor=#232F3E;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1000" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="The one rule (SHA gate): never test a stale deployment &#8212; the preview URL is reused across pushes, so gate on the pushed SHA before running any check." style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontColor=#5A6B7B;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="52" width="1100" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- ============ LANE A: Agent / Dev ============ -->
+        <mxCell id="laneA" value="AGENT / DEVELOPER" style="swimlane;html=1;startSize=28;horizontal=1;fillColor=#F5F0FA;strokeColor=#9673a6;fontColor=#6b4c86;fontStyle=1;fontSize=13;verticalAlign=middle;align=center;swimlaneFillColor=#FBF9FD;" vertex="1" parent="1">
+          <mxGeometry x="40" y="100" width="1560" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="a_change" value="1&#160;&#160;Make code change&#xa;on PR branch" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="laneA">
+          <mxGeometry x="30" y="70" width="150" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="a_push" value="2&#160;&#160;Commit &amp; push&#xa;record pushed SHA" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="laneA">
+          <mxGeometry x="230" y="70" width="150" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="a_watch" value="6&#160;&#160;preview-iterate&#xa;watch --pr N --sha S&#xa;(polls, SHA-gated)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="laneA">
+          <mxGeometry x="880" y="66" width="180" height="78" as="geometry" />
+        </mxCell>
+        <mxCell id="a_test" value="8&#160;&#160;Run checks vs live URL&#xa;curl endpoints / e2e /&#xa;/diagnostics" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="laneA">
+          <mxGeometry x="1200" y="66" width="180" height="78" as="geometry" />
+        </mxCell>
+        <mxCell id="a_done" value="10&#160;&#160;PR approved&#xa;&amp; merged / closed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="laneA">
+          <mxGeometry x="1410" y="66" width="130" height="78" as="geometry" />
+        </mxCell>
+
+        <!-- ============ LANE B: GitHub Actions ============ -->
+        <mxCell id="laneB" value="GITHUB ACTIONS  (preview.yml)" style="swimlane;html=1;startSize=28;horizontal=1;fillColor=#EFEFF2;strokeColor=#5A6B7B;fontColor=#3A4756;fontStyle=1;fontSize=13;verticalAlign=middle;align=center;swimlaneFillColor=#F8F8FA;" vertex="1" parent="1">
+          <mxGeometry x="40" y="300" width="1560" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="b_build" value="3&#160;&#160;Build image&#xa;(GIT_SHA baked)&#xa;push to ECR" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="laneB">
+          <mxGeometry x="230" y="80" width="150" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="b_helm" value="4&#160;&#160;helm upgrade --install&#xa;into namespace pr-N&#xa;(shared ALB routes)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="laneB">
+          <mxGeometry x="430" y="80" width="170" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="b_poll" value="5&#160;&#160;Poll real URL until&#xa;/api/health = pushed SHA" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="laneB">
+          <mxGeometry x="650" y="80" width="170" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="b_status" value="Write GitHub Deployment&#xa;(environment_url) +&#xa;Check Run + PR comment" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="laneB">
+          <mxGeometry x="880" y="70" width="180" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="b_teardown" value="preview-teardown.yml&#xa;helm uninstall + delete ns&#xa;+ DROP SCHEMA pr_N" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="laneB">
+          <mxGeometry x="1380" y="80" width="160" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- ============ Decision + gate row (on canvas, between/below) ============ -->
+        <mxCell id="gate" value="Ready?&#xa;Check Run(SHA)=success&#xa;AND health.sha=SHA" style="rhombus;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="910" y="560" width="200" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="failed" value="7b&#160;&#160;failed&#xa;read failure.reason +&#xa;remediation&#xa;(ImagePull / MissingEnv /&#xa;HealthCheck)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="470" y="575" width="200" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="ready" value="7a&#160;&#160;ready&#xa;action: run_checks&#xa;(safe to test)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1240" y="580" width="180" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- ============ Two agent-path callouts ============ -->
+        <mxCell id="pathbox" value="Who drives steps 6&#8211;8?" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#9673a6;dashed=1;verticalAlign=top;align=left;spacingLeft=10;spacingTop=8;fontColor=#6b4c86;fontSize=12;fontStyle=1;container=1;pointerEvents=0;collapsible=0;" vertex="1" parent="1">
+          <mxGeometry x="120" y="760" width="640" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="path_local" value="A&#160;&#160;Local interactive loop&#160;&#160;(the default path)&#xa;&#xa;The agent runs in the repo (Claude Code). It pushes,&#xa;runs preview-iterate watch, and on failed reads the&#xa;structured reason, fixes, and re-pushes &#8212; a human&#xa;can drive the identical loop." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;spacingTop=8;" vertex="1" parent="pathbox">
+          <mxGeometry x="20" y="40" width="290" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="path_ci" value="B&#160;&#160;Autonomous CI loop&#160;&#160;(wired, @claude)&#xa;&#xa;preview-agent.yml runs claude-code-action on a&#xa;PR comment / trigger, unattended, with iteration +&#xa;cost caps (max_iterations, budget_usd) and a&#xa;same-repo + @claude gate." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;spacingTop=8;" vertex="1" parent="pathbox">
+          <mxGeometry x="330" y="40" width="290" height="140" as="geometry" />
+        </mxCell>
+
+        <!-- ============ EDGES ============ -->
+        <!-- 1 -> 2 -->
+        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;" edge="1" parent="1" source="a_change" target="a_push">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- 2 -> 3 (down into lane B) -->
+        <mxCell id="e23" value="triggers workflow" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;labelBackgroundColor=#ffffff;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="a_push" target="b_build">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- 3 -> 4 -> 5 -->
+        <mxCell id="e34" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;" edge="1" parent="1" source="b_build" target="b_helm">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e45" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;" edge="1" parent="1" source="b_helm" target="b_poll">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- 5 poll -> status (short horizontal, same row) -->
+        <mxCell id="e5s" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="b_poll" target="b_status">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- status -> 6 watch: clean straight vertical (watch sits directly above status) -->
+        <mxCell id="es6" value="status is the&#xa;source of truth" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;labelBackgroundColor=#ffffff;strokeWidth=2;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="b_status" target="a_watch">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- 6 watch -> gate: exit right and route down the clear x=1170 corridor,
+             around the status box (which spans the same x-column), into the gate top -->
+        <mxCell id="e6g" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="a_watch" target="gate">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1170" y="205" />
+              <mxPoint x="1170" y="530" />
+              <mxPoint x="1010" y="530" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <!-- gate -> failed (7b) -->
+        <mxCell id="egf" value="no / failed" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=11;labelBackgroundColor=#ffffff;strokeColor=#b85450;strokeWidth=2;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="gate" target="failed">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- gate -> ready (7a) -->
+        <mxCell id="egr" value="yes / ready" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=11;labelBackgroundColor=#ffffff;strokeColor=#82b366;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="gate" target="ready">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- failed -> back to 1 (fix loop) -->
+        <mxCell id="ef1" value="fix &amp; re-push&#xa;(new SHA)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=11;labelBackgroundColor=#ffffff;strokeColor=#b85450;strokeWidth=2;dashed=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="failed" target="a_change">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="115" y="530" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <!-- ready -> 8 test (up) -->
+        <mxCell id="er8" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#82b366;strokeWidth=2;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="ready" target="a_test">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- 8 test -> 10 done -->
+        <mxCell id="e8d" value="pass" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=11;labelBackgroundColor=#ffffff;strokeColor=#82b366;strokeWidth=2;" edge="1" parent="1" source="a_test" target="a_done">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- 10 done -> teardown (down into lane B) -->
+        <mxCell id="edt" value="on close/merge" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;labelBackgroundColor=#ffffff;strokeColor=#b85450;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="a_done" target="b_teardown">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

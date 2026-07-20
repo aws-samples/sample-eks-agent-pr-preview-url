@@ -1,0 +1,306 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/awslabs/automated-security-helper/refs/heads/main/automated_security_helper/schemas/AshConfig.json
+project_name: eks-agent-pr-preview-url
+global_settings:
+  severity_threshold: MEDIUM
+  # Generated build artifacts and vendored dependencies — not project source.
+  # These produce the bulk of the raw findings (TS build cache hashes read as
+  # high-entropy secrets; CDK synth output; aws-cdk-lib's own Python handlers).
+  ignore_paths:
+    - path: 'app/tsconfig.tsbuildinfo'
+      reason: 'Generated TypeScript incremental build cache (gitignored); its hashes trip detect-secrets. Not source.'
+    - path: 'infra/cdk.out'
+      reason: 'Generated CDK synth output (gitignored). Findings are re-derived from the CDK source, which cdk-nag gates.'
+    - path: 'infra/node_modules'
+      reason: 'Vendored dependency (aws-cdk-lib). Not this project''s source; SCA is covered by npm-audit.'
+    - path: 'app/node_modules'
+      reason: 'Vendored dependency. Not project source.'
+    - path: 'skills/preview-iterate/node_modules'
+      reason: 'Vendored dependency. Not project source.'
+  # Verified false positives (see ash-security-audit-2026-07-19.md for the review).
+  suppressions:
+    - rule_id: 'SECRET-SECRET-KEYWORD'
+      path: 'charts/preview-env/values.yaml'
+      reason: 'Helm value KEYS named secretKey/secretName — configuration field names, not secret values.'
+    - rule_id: 'SECRET-SECRET-KEYWORD'
+      path: 'charts/preview-env/templates/externalsecret.yaml'
+      reason: 'The word "secret" in a comment/ESO template field name, not a literal secret.'
+    - rule_id: 'SECRET-SECRET-KEYWORD'
+      path: 'examples/app-repo-caller/.github/workflows/preview-teardown.yml'
+      reason: '"secrets: inherit" is a GitHub Actions keyword, not a secret value.'
+    - rule_id: 'SECRET-SECRET-KEYWORD'
+      path: 'examples/app-repo-caller/.github/workflows/preview.yml'
+      reason: '"secrets: inherit" is a GitHub Actions keyword, not a secret value.'
+    - rule_id: 'SECRET-HEX-HIGH-ENTROPY-STRING'
+      path: 'skills/preview-iterate/lib/preview-status.test.mjs'
+      reason: 'Fake fixture SHA "abcdef1234567890" in a unit test — not a real secret.'
+    - rule_id: 'SECRET-HEX-HIGH-ENTROPY-STRING'
+      path: 'skills/preview-iterate/lib/gh-parse.test.mjs'
+      reason: 'Fake fixture SHA "abcdef1234567890" in a unit test — not a real secret.'
+    - rule_id: 'CKV_SECRET_6'
+      path: 'charts/preview-env/values.yaml'
+      reason: 'Base64 flagged on a config field default, not a real embedded secret.'
+    - rule_id: 'yaml.github-actions.security.run-shell-injection.run-shell-injection'
+      path: '.github/workflows/preview.yml'
+      reason: 'Interpolated values are trusted workflow_call inputs (eks_cluster/aws_region), quoted; not attacker-controlled PR data.'
+    - rule_id: 'yaml.github-actions.security.run-shell-injection.run-shell-injection'
+      path: '.github/workflows/preview-teardown.yml'
+      reason: 'Interpolated values are trusted workflow_call inputs, quoted; not attacker-controlled.'
+    - rule_id: 'yaml.github-actions.security.github-script-injection.github-script-injection'
+      path: '.github/workflows/preview.yml'
+      reason: 'Value is read via process.env.PREVIEW_URL (the safe pattern), not interpolated into the script body.'
+    - rule_id: 'bash.lang.security.ifs-tampering.ifs-tampering'
+      path: 'scripts/render-eksctl-config.sh'
+      reason: 'Deliberate function-scoped "local IFS=,\" for CSV parsing — standard, safe bash idiom.'
+    - rule_id: 'yaml.github-actions.security.secrets-inherit.secrets-inherit'
+      path: 'examples/app-repo-caller/.github/workflows/preview.yml'
+      reason: 'Example caller MUST use secrets: inherit to pass the deploy-role secret to the reusable workflow; documented intended usage.'
+    - rule_id: 'yaml.github-actions.security.secrets-inherit.secrets-inherit'
+      path: 'examples/app-repo-caller/.github/workflows/preview-teardown.yml'
+      reason: 'Example caller MUST use secrets: inherit to pass the deploy-role secret to the reusable workflow; documented intended usage.'
+    - rule_id: 'CKV2_GHA_1'
+      path: 'examples/app-repo-caller/.github/workflows/preview.yml'
+      reason: 'Example caller; the reusable workflow it calls declares least-privilege job permissions. Not a real over-permission on the platform.'
+    - rule_id: 'CKV2_GHA_1'
+      path: 'examples/app-repo-caller/.github/workflows/preview-teardown.yml'
+      reason: 'Example caller; the reusable workflow declares its own least-privilege permissions.'
+    - rule_id: 'CKV_K8S_43'
+      path: 'charts/preview-env/cloudfront-keepalive.yaml'
+      reason: 'Accepted: the keepalive is a throwaway health-holder pinned to a public nginx tag (public.ecr.aws/nginx/nginx:1.27-alpine). Digest-pinning a public base image is impractical for a sample and adds no security to a static 200-responder.'
+    - rule_id: 'CKV2_K8S_6'
+      path: 'charts/preview-env/cloudfront-keepalive.yaml'
+      reason: 'Accepted: the keepalive namespace holds only a static nginx health-responder; a default-deny NetworkPolicy is on the roadmap but the pod exposes only /keepalive on the internal ALB.'
+    # Accepted (documented in persona-review-backlog.md): workflows pin first-party
+    # actions by major-version tag (@v4) — the readable convention for an aws-samples
+    # reference. SHA-pinning is a valid hardening a consumer can apply (and Dependabot
+    # can manage); we don't SHA-pin in the sample to keep the examples legible.
+    - rule_id: 'yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag'
+      path: '.github/workflows/ci.yml'
+      reason: 'Actions pinned by major-version tag by design (aws-samples readability); SHA-pinning is a documented consumer-side hardening. See docs/persona-review-backlog.md.'
+    - rule_id: 'yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag'
+      path: '.github/workflows/preview.yml'
+      reason: 'Actions pinned by major-version tag by design (aws-samples readability); SHA-pinning is a documented consumer-side hardening.'
+    - rule_id: 'yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag'
+      path: '.github/workflows/preview-agent.yml'
+      reason: 'Actions pinned by major-version tag by design (aws-samples readability); SHA-pinning is a documented consumer-side hardening.'
+    - rule_id: 'yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag'
+      path: '.github/workflows/preview-sweep.yml'
+      reason: 'Actions pinned by major-version tag by design (aws-samples readability); SHA-pinning is a documented consumer-side hardening.'
+    - rule_id: 'yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag'
+      path: '.github/workflows/preview-teardown.yml'
+      reason: 'Actions pinned by major-version tag by design (aws-samples readability); SHA-pinning is a documented consumer-side hardening.'
+fail_on_findings: true
+ash_plugin_modules: []
+external_reports_to_include: []
+build: null
+converters:
+  archive:
+    name: archive
+    enabled: true
+    options: {}
+  jupyter:
+    name: jupyter
+    enabled: true
+    options:
+      tool_version: '>=7.16.0,<8.0.0'
+      install_timeout: 300
+scanners:
+  bandit:
+    name: bandit
+    enabled: true
+    options:
+      severity_threshold: null
+      config_file: null
+      confidence_level: all
+      ignore_nosec: false
+      excluded_paths: []
+      additional_formats: []
+      tool_version: '>=1.7.0,<2.0.0'
+      install_timeout: 300
+  cdk-nag:
+    name: cdk-nag
+    enabled: true
+    options:
+      severity_threshold: null
+      nag_packs:
+        AwsSolutionsChecks: true
+        HIPAASecurityChecks: false
+        NIST80053R4Checks: false
+        NIST80053R5Checks: false
+        PCIDSS321Checks: false
+  cfn-nag:
+    name: cfn-nag
+    enabled: true
+    options:
+      severity_threshold: null
+  checkov:
+    name: checkov
+    enabled: true
+    options:
+      severity_threshold: null
+      config_file: null
+      skip_path: []
+      additional_formats:
+      - cyclonedx_json
+      offline: false
+      frameworks:
+      - all
+      skip_frameworks: []
+      tool_version: null
+      install_timeout: 300
+  detect-secrets:
+    name: detect-secrets
+    enabled: true
+    options:
+      severity_threshold: null
+      baseline_file: null
+      scan_settings:
+        version: null
+        generated_at: null
+        plugins_used: []
+        filters_used: []
+        results: {}
+  grype:
+    name: grype
+    enabled: true
+    options:
+      severity_threshold: null
+      config_file: null
+      offline: false
+  npm-audit:
+    name: npm-audit
+    enabled: true
+    options:
+      severity_threshold: null
+      offline: false
+  opengrep:
+    name: opengrep
+    enabled: true
+    options:
+      severity_threshold: null
+      config: auto
+      exclude:
+      - '*-converted.py'
+      - '*_report_result.txt'
+      exclude_rule: []
+      severity: []
+      metrics: auto
+      offline: false
+      patterns: []
+      version: v1.15.1
+  semgrep:
+    name: semgrep
+    enabled: true
+    options:
+      severity_threshold: null
+      config: auto
+      exclude:
+      - '*-converted.py'
+      - '*_report_result.txt'
+      exclude_rule: []
+      severity: []
+      metrics: auto
+      offline: false
+      tool_version: null
+      install_timeout: 300
+  syft:
+    name: syft
+    enabled: true
+    options:
+      severity_threshold: null
+      config_file: null
+      exclude: []
+      additional_outputs:
+      - syft-table
+reporters:
+  csv:
+    name: csv
+    enabled: true
+    options: {}
+    extension: csv
+  cyclonedx:
+    name: cyclonedx
+    enabled: true
+    options: {}
+    extension: cdx.json
+  html:
+    name: html
+    enabled: true
+    options: {}
+    extension: html
+  flat-json:
+    name: flat-json
+    enabled: true
+    options:
+      include_scanner_metrics: true
+      include_summary_metrics: true
+      include_metadata: true
+    extension: flat.json
+  gitlab-sast:
+    name: gitlab-sast
+    enabled: true
+    options: {}
+    extension: gl-sast-report.json
+  junitxml:
+    name: junitxml
+    enabled: true
+    options:
+      respect_severity_threshold: true
+    extension: junit.xml
+  markdown:
+    name: markdown
+    enabled: true
+    options:
+      include_summary: true
+      include_findings_table: false
+      include_detailed_findings: true
+      max_detailed_findings: 20
+      top_hotspots_limit: 10
+      use_collapsible_details: true
+    extension: summary.md
+  ocsf:
+    name: ocsf
+    enabled: true
+    options: {}
+    extension: ocsf.json
+  sarif:
+    name: sarif
+    enabled: true
+    options: {}
+    extension: sarif
+  spdx:
+    name: spdx
+    enabled: false
+    options: {}
+    extension: spdx.json
+  text:
+    name: text
+    enabled: true
+    options:
+      include_summary: true
+      include_findings_table: false
+      include_detailed_findings: false
+      max_detailed_findings: 20
+      top_hotspots_limit: 20
+    extension: summary.txt
+  yaml:
+    name: yaml
+    enabled: false
+    options: {}
+    extension: yaml
+mcp-resource-management:
+  max_concurrent_scans: 3
+  max_concurrent_tasks: 20
+  thread_pool_max_workers: 4
+  scan_timeout_seconds: 1800
+  operation_timeout_seconds: 180
+  shutdown_timeout_seconds: 30
+  memory_warning_threshold_mb: 1024
+  memory_critical_threshold_mb: 2048
+  task_count_warning_threshold: 15
+  max_message_size_bytes: 10485760
+  max_path_length: 4096
+  max_directory_size_mb: 1000
+  enable_health_checks: true
+  health_check_interval_seconds: 60
+  enable_resource_logging: true
+  log_resource_operations: false

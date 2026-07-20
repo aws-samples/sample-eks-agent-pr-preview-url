@@ -1,0 +1,84 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# CI gate: runs the full non-cluster test suite on every push/PR,
+# plus actionlint (workflow logic) and helm lint (chart) — the layers that were
+# previously never validated automatically.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Install workspace deps
+        run: |
+          (cd app && npm ci) || (cd app && npm install)
+          (cd skills/preview-iterate && npm ci) || (cd skills/preview-iterate && npm install)
+          (cd infra && npm ci) || (cd infra && npm install)
+
+      - name: actionlint (workflow logic)
+        uses: raven-actions/actionlint@v2
+
+      - name: shellcheck (scripts, warning+)
+        # severity=warning: info-level "source not followed" on `source project.env`
+        # is expected (the sourced file isn't a static input) and not actionable.
+        run: shellcheck --severity=warning scripts/*.sh scripts/demo/*.sh tests/*.sh
+
+      - name: helm lint
+        run: helm lint charts/preview-env
+
+      - name: Bash deploy-library unit tests
+        run: bash tests/bash-lib.test.sh
+
+      - name: Reaper fail-closed guard tests (stubbed kubectl)
+        run: bash tests/preview-sweep.test.sh
+
+      - name: CloudFront signed-URL signer tests (stubbed Secrets Manager)
+        run: bash tests/cf-sign-url.test.sh
+
+      - name: App unit tests
+        run: cd app && npm test
+
+      - name: Skill unit tests (logic + I/O with stubs)
+        run: cd skills/preview-iterate && npm test
+
+      - name: Helm render tests
+        run: bash tests/helm-render.test.sh
+
+      - name: Typechecks
+        run: |
+          cd app && npm run typecheck
+          cd ../infra && npx tsc --noEmit
+
+      # CDK assertions synthesize all stacks in-memory (Template.fromStack), so
+      # they fully validate synth without needing AWS creds. A standalone
+      # `cdk synth` is intentionally NOT run here: the L2 ec2.Vpc does a live AZ
+      # context lookup that requires real credentials (run it locally/in deploy).
+      - name: CDK assertions (hermetic synth)
+        run: cd infra && JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 npm test
+
+      - name: Native e2e (no Docker/cluster needed)
+        run: node e2e/native-e2e.mjs

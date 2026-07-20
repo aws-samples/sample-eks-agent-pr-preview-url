@@ -1,0 +1,25 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# EXAMPLE — copy this into the *app* repo (the one whose PRs get previewed).
+# This is the entire footprint the app repo needs.
+#
+# Replace `your-org` with your GitHub org, and pin `@<ref>` to a published release
+# tag of this platform repo (e.g. `@v1` once a v1 release is cut) or a commit SHA.
+# Until you've tagged a release, use `@main`.
+name: preview
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+jobs:
+  preview:
+    uses: your-org/samples-eks-agent-pr-preview-url/.github/workflows/preview.yml@v1  # or @main until tagged
+    permissions:
+      contents: read
+      deployments: write
+      checks: write
+      id-token: write
+      pull-requests: write
+    with:
+      routing_mode: path
+      ingress_host_base: https://your-alb-hostname.elb.amazonaws.com
+    secrets: inherit

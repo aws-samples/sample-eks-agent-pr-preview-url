@@ -1,0 +1,53 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# eksctl-cluster.yaml — EKS Auto Mode cluster reusing the CDK-provisioned VPC.
+#
+# This is the DEFAULT, proven cluster path. CDK provisions the VPC, Aurora, ECR,
+# and the OIDC deploy role; eksctl provisions the Auto Mode cluster (control
+# plane + cluster/node IAM roles + instance profile + node pools), reusing the
+# CDK VPC by subnet id — so nodes come up with no NodeClass surgery.
+#
+# Do NOT edit the {{...}} placeholders by hand. Run:
+#     ./scripts/render-eksctl-config.sh          # fills them from CDK outputs
+#     eksctl create cluster -f eksctl/eksctl-cluster.rendered.yaml
+#
+# The opt-in pure-CDK alternative is `cdk deploy -c clusterProvisioner=cdk`
+# (see infra/lib/cluster-stack.ts + docs/runbook.md).
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: {{PROJECT_NAME}}
+  region: {{AWS_REGION}}
+  version: "1.31"
+
+# EKS Auto Mode ships integrated VPC CNI, kube-proxy, and CoreDNS, so eksctl's
+# managed default add-ons must be disabled to avoid conflicts.
+addonsConfig:
+  disableDefaultAddons: true
+
+# Reuse the CDK-created VPC by subnet id (no new VPC/NAT/IGW created).
+# Private subnets host Auto Mode nodes; public subnets carry the internet-facing
+# shared ALB (discovered via the kubernetes.io/role/elb=1 tag CDK sets).
+vpc:
+  id: "{{VPC_ID}}"
+  subnets:
+    private:
+{{PRIVATE_SUBNETS}}
+    public:
+{{PUBLIC_SUBNETS}}
+
+# EKS Auto Mode: managed compute; eksctl wires the node role/instance profile the
+# way Auto Mode expects. (Do NOT use managedNodeGroups — Auto Mode replaces them.)
+autoModeConfig:
+  enabled: true
+  nodePools: ["general-purpose", "system"]
+
+# OIDC provider for IRSA (External Secrets Operator's role, when the DB is enabled).
+iam:
+  withOIDC: true
+
+# Control-plane logging (matches the CDK log types / cdk-nag EKS2).
+cloudWatch:
+  clusterLogging:
+    enableTypes: ["api", "audit", "authenticator", "controllerManager", "scheduler"]

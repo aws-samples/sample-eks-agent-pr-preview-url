@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="30.3.14">
+  <diagram name="ABCA + Preview" id="abca-e2e">
+    <mxGraphModel dx="1500" dy="950" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1120" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="ABCA &#215; PR preview-URL platform &#8212; autonomous change &#8594; testable preview &#8594; verified screenshot" style="text;html=1;align=left;verticalAlign=middle;fontSize=19;fontStyle=1;fontColor=#232F3E;" vertex="1" parent="1">
+          <mxGeometry x="40" y="16" width="1200" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="sub" value="The GitHub PR is the only seam: ABCA produces PRs; the platform gives them preview URLs and emits deployment_status; ABCA screenshots the live URL back onto the PR." style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontColor=#5A6B7B;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="48" width="1300" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Lane 1: ABCA (AWS) ===== -->
+        <mxCell id="laneA" value="ABCA  (Autonomous Background Coding Agents — its own AWS account/stack)" style="swimlane;html=1;startSize=28;fillColor=#EAF1FB;strokeColor=#6c8ebf;fontColor=#274c77;fontStyle=1;fontSize=13;verticalAlign=middle;align=center;swimlaneFillColor=#F7FAFE;" vertex="1" parent="1">
+          <mxGeometry x="40" y="90" width="1620" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="a_task" value="1&#160;&#160;Submit task&#xa;(CLI / curl → /v1/tasks)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="laneA">
+          <mxGeometry x="30" y="60" width="160" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="a_agent" value="2&#160;&#160;Agent (AgentCore MicroVM)&#xa;clone → edit → mise build/lint&#xa;→ open PR" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="laneA">
+          <mxGeometry x="250" y="54" width="220" height="78" as="geometry" />
+        </mxCell>
+        <mxCell id="a_shot" value="7&#160;&#160;Screenshot pipeline&#xa;deployment_status → AgentCore&#xa;Browser captures the live URL&#xa;→ posts image on the PR" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="laneA">
+          <mxGeometry x="1230" y="46" width="240" height="94" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Lane 2: GitHub (the seam) ===== -->
+        <mxCell id="laneG" value="GitHub  (the seam — no direct API coupling between the two systems)" style="swimlane;html=1;startSize=28;fillColor=#F3F0F7;strokeColor=#9673a6;fontColor=#5b3d7a;fontStyle=1;fontSize=13;verticalAlign=middle;align=center;swimlaneFillColor=#FBF9FD;" vertex="1" parent="1">
+          <mxGeometry x="40" y="270" width="1620" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="g_pr" value="3&#160;&#160;Pull Request opened&#xa;branch bgagent/&lt;task&gt;/&lt;slug&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="laneG">
+          <mxGeometry x="250" y="52" width="220" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="g_dep" value="6&#160;&#160;Deployment + deployment_status&#xa;state=success · environment=Preview&#xa;environment_url = signed&#xa;*.cloudfront.net URL (short TTL)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="laneG">
+          <mxGeometry x="900" y="46" width="250" height="82" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Lane 3: Preview platform on EKS ===== -->
+        <mxCell id="laneP" value="PR preview-URL platform  (Amazon EKS Auto Mode)" style="swimlane;html=1;startSize=28;fillColor=#FDF0E6;strokeColor=#d79b00;fontColor=#95560a;fontStyle=1;fontSize=13;verticalAlign=middle;align=center;swimlaneFillColor=#FEF8F1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="440" width="1620" height="255" as="geometry" />
+        </mxCell>
+        <mxCell id="p_build" value="4&#160;&#160;Build image (GIT_SHA)&#xa;push ECR → helm install&#xa;into ns pr-&lt;n&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="laneP">
+          <mxGeometry x="250" y="60" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="p_ready" value="5&#160;&#160;CloudFront (signed URL) →&#xa;PRIVATE ALB via VPC Origin&#xa;poll /api/health = pushed SHA&#xa;(SHA-gated: never test stale)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="laneP">
+          <mxGeometry x="560" y="56" width="250" height="88" as="geometry" />
+        </mxCell>
+        <mxCell id="p_pod" value="Next.js preview pod&#xa;served at /pr-&lt;n&gt; (path mode)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fbe4cc;strokeColor=#d79b00;fontSize=10;dashed=1;" vertex="1" parent="laneP">
+          <mxGeometry x="860" y="46" width="200" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="p_teardown" value="8&#160;&#160;Teardown (on PR close /&#xa;post-verify): helm uninstall +&#xa;delete ns pr-&lt;n&gt; → confirm reaped&#xa;(sweep reaps orphans)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;dashed=1;" vertex="1" parent="laneP">
+          <mxGeometry x="1130" y="52" width="240" height="92" as="geometry" />
+        </mxCell>
+        <mxCell id="p_test" value="7b&#160;&#160;Test-task (read-only)&#xa;verify preview URL: SHA-gate,&#xa;routing, page renders, change live&#xa;&#8594; posts pass/fail comment on the PR" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="laneP">
+          <mxGeometry x="560" y="168" width="270" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- ===== EDGES ===== -->
+        <!-- 1 -> 2 -->
+        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;" edge="1" parent="1" source="a_task" target="a_agent"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <!-- 2 -> 3 (agent opens PR; down into GitHub lane) -->
+        <mxCell id="e23" value="opens PR" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;labelBackgroundColor=#ffffff;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="a_agent" target="g_pr"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <!-- 3 -> 4 (PR triggers platform; down into platform lane) -->
+        <mxCell id="e34" value="PR opened / new SHA" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;labelBackgroundColor=#ffffff;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="g_pr" target="p_build"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <!-- 4 -> 5 -->
+        <mxCell id="e45" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;" edge="1" parent="1" source="p_build" target="p_ready"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <!-- pod served by 5 (dashed, up) -->
+        <mxCell id="ep" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#d79b00;dashed=1;endArrow=none;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="p_ready" target="p_pod"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <!-- 5 -> 6 (ready → write deployment_status; up into GitHub lane) -->
+        <mxCell id="e56" value="on ready:&#xa;write deployment_status" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;labelBackgroundColor=#ffffff;strokeWidth=2;strokeColor=#2E8B57;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="p_ready" target="g_dep">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="875" y="540"/></Array></mxGeometry>
+        </mxCell>
+        <!-- 6 -> 7 (deployment_status webhook up into ABCA lane) -->
+        <mxCell id="e67" value="deployment_status webhook&#xa;POST /v1/github/webhook" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;labelBackgroundColor=#ffffff;strokeWidth=2;strokeColor=#2E8B57;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="g_dep" target="a_shot"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <!-- 7 -> back to PR (screenshot comment; down to GitHub lane) -->
+        <mxCell id="e7pr" value="posts screenshot comment on the PR" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;labelBackgroundColor=#ffffff;strokeWidth=2;strokeColor=#82b366;dashed=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a_shot" target="g_pr">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1640" y="349"/><mxPoint x="1640" y="700"/><mxPoint x="500" y="700"/><mxPoint x="500" y="349"/></Array></mxGeometry>
+        </mxCell>
+
+        <!-- pod -> teardown (dashed, lifecycle end) -->
+        <mxCell id="e_td" value="dispose" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;labelBackgroundColor=#ffffff;strokeColor=#d79b00;dashed=1;strokeWidth=2;" edge="1" parent="laneP" source="p_ready" target="p_teardown"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- 5 -> 7b (green readiness/verification: trigger the read-only test-task when the preview is ready) -->
+        <mxCell id="e5test" value="on ready: trigger test-task (TEST_TASK=1)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;labelBackgroundColor=#ffffff;strokeWidth=2;strokeColor=#2E8B57;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="laneP" source="p_ready" target="p_test"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <!-- 7b -> back to PR (dashed comment-back; up into GitHub lane) -->
+        <mxCell id="e_testpr" value="posts pass/fail comment on the PR" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;labelBackgroundColor=#ffffff;strokeWidth=2;strokeColor=#82b366;dashed=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;verticalLabelPosition=middle;" edge="1" parent="1" source="p_test" target="g_pr">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="230" y="648"/><mxPoint x="230" y="340"/></Array></mxGeometry>
+        </mxCell>
+
+        <!-- Legend -->
+        <mxCell id="legend" value="Numbered 1→7 = one autonomous cycle; 7b = read-only test-task; 8 = verifiable teardown. Green = readiness/verification path. Dashed = serving / comment-back / dispose." style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontColor=#5A6B7B;" vertex="1" parent="1">
+          <mxGeometry x="40" y="730" width="1340" height="20" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

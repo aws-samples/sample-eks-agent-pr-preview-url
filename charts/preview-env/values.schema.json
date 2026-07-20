@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "preview-env values",
+  "description": "Schema for the PR preview-environment chart. Fails `helm template/install` fast on typos (e.g. routing.mode) or wrong types, and enforces the host-mode → baseDomain dependency.",
+  "type": "object",
+  "properties": {
+    "prNumber": { "type": ["integer", "string"], "description": "PR number; names the namespace/basePath/host." },
+    "commitSha": { "type": "string" },
+    "replicas": { "type": "integer", "minimum": 1 },
+    "bootDelayMs": { "type": "integer", "minimum": 0 },
+    "databaseUrlInline": { "type": "string" },
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      },
+      "additionalProperties": true
+    },
+    "routing": {
+      "type": "object",
+      "properties": {
+        "mode": { "type": "string", "enum": ["path", "host"], "description": "Preview routing: 'path' (/pr-N, no DNS) or 'host' (pr-N.<baseDomain>)." },
+        "baseDomain": { "type": "string" },
+        "pathHost": { "type": "string" },
+        "ingressClassName": { "type": "string" },
+        "annotations": { "type": "object" }
+      },
+      "required": ["mode", "ingressClassName"],
+      "additionalProperties": true,
+      "if": { "properties": { "mode": { "const": "host" } } },
+      "then": {
+        "properties": { "baseDomain": { "type": "string", "minLength": 1 } },
+        "required": ["baseDomain"]
+      }
+    },
+    "basicAuth": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "secretName": { "type": "string" },
+        "secretKey": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "protect": {
+      "type": "object",
+      "properties": { "enabled": { "type": "boolean" } },
+      "additionalProperties": true
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "port": { "type": "integer" },
+        "targetPort": { "type": "integer" }
+      },
+      "additionalProperties": true
+    },
+    "guardrails": {
+      "type": "object",
+      "properties": {
+        "networkPolicy": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "dbPort": { "type": "integer" },
+            "ingressNamespaces": { "type": "array", "items": { "type": "string" } },
+            "dbEgressCidr": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "resourceQuota": { "type": "object" },
+        "limitRange": { "type": "object" },
+        "podDisruptionBudget": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "externalSecret": {
+      "type": "object",
+      "properties": { "enabled": { "type": "boolean" } },
+      "additionalProperties": true
+    },
+    "securityContext": { "type": "object" },
+    "resources": { "type": "object" },
+    "extraEnv": { "type": "array" },
+    "commonLabels": { "type": "object" }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,108 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+{{- /* Per-PR namespace guardrails: cap resources, default limits,
+       default-deny network, and a PDB so node drains aren't blocked. */ -}}
+{{- if .Values.guardrails.resourceQuota.enabled }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ include "preview-env.name" . }}-quota
+  labels:
+    {{- include "preview-env.labels" . | nindent 4 }}
+spec:
+  hard:
+    requests.cpu: {{ .Values.guardrails.resourceQuota.hardCpu | quote }}
+    limits.cpu: {{ .Values.guardrails.resourceQuota.hardCpu | quote }}
+    requests.memory: {{ .Values.guardrails.resourceQuota.hardMemory | quote }}
+    limits.memory: {{ .Values.guardrails.resourceQuota.hardMemory | quote }}
+    pods: {{ .Values.guardrails.resourceQuota.maxPods | quote }}
+{{- end }}
+{{- if .Values.guardrails.limitRange.enabled }}
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: {{ include "preview-env.name" . }}-limits
+  labels:
+    {{- include "preview-env.labels" . | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: {{ .Values.guardrails.limitRange.defaultCpu | quote }}
+        memory: {{ .Values.guardrails.limitRange.defaultMemory | quote }}
+      defaultRequest:
+        cpu: {{ .Values.guardrails.limitRange.defaultRequestCpu | quote }}
+        memory: {{ .Values.guardrails.limitRange.defaultRequestMemory | quote }}
+{{- end }}
+{{- if .Values.guardrails.networkPolicy.enabled }}
+---
+# Default-deny ingress, allow only from the ingress-controller namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "preview-env.name" . }}-allow-ingress
+  labels:
+    {{- include "preview-env.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "preview-env.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        # Only the ingress-controller namespaces may reach the preview pod. This
+        # deliberately does NOT match the shared `part-of: preview-platform`
+        # label (every preview carries it → would allow cross-preview traffic);
+        # tenant isolation between previews depends on this being controller-only.
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  {{- range .Values.guardrails.networkPolicy.ingressNamespaces }}
+                  - {{ . | quote }}
+                  {{- end }}
+      ports:
+        - port: {{ .Values.service.targetPort }}
+---
+# Egress: DNS + the shared Aurora port only (no open internet from previews).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "preview-env.name" . }}-egress
+  labels:
+    {{- include "preview-env.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "preview-env.selectorLabels" . | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    # DNS (to anywhere — CoreDNS resolution).
+    - ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    # DB port, destination-scoped: default 0.0.0.0/0 (prior behavior), but set
+    # guardrails.networkPolicy.dbEgressCidr to your Aurora/VPC CIDR so a
+    # compromised preview can't reach arbitrary hosts on the DB port.
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.guardrails.networkPolicy.dbEgressCidr | quote }}
+      ports:
+        - { port: {{ .Values.guardrails.networkPolicy.dbPort }}, protocol: TCP }
+{{- end }}
+{{- if .Values.guardrails.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "preview-env.name" . }}-pdb
+  labels:
+    {{- include "preview-env.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.guardrails.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "preview-env.selectorLabels" . | nindent 6 }}
+{{- end }}

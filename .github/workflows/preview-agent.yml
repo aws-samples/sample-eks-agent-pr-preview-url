@@ -1,0 +1,152 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# Autonomous CI agent: reacts to "@claude" on a PR, drives the preview
+# SHA-gated loop, and iterates on failures. Bounds: a hard per-run --max-turns cap
+# + a write-access-author @claude trigger guard; per-run iteration/budget limits are
+# passed to the agent (harness-enforced multi-run capping is the next phase).
+#
+# Reusable; called from the app repo:
+#   on: { issue_comment: { types: [created] } }
+#   jobs:
+#     agent:
+#       if: github.event.issue.pull_request
+#       uses: your-org/samples-eks-agent-pr-preview-url/.github/workflows/preview-agent.yml@v1
+#       secrets: inherit
+#
+# Auth: defaults to Amazon Bedrock via GitHub OIDC (set the AWS_ROLE_TO_ASSUME
+# secret). To use the direct Anthropic API instead, set the ANTHROPIC_API_KEY
+# secret and pass `auth: api-key` as an input.
+name: preview-agent
+
+on:
+  workflow_call:
+    inputs:
+      max_iterations: { type: number, default: 5 }
+      budget_usd: { type: number, default: 5 }
+      # 'bedrock' (default) or 'api-key'. Selects how the Claude Code Action authenticates.
+      auth: { type: string, default: "bedrock" }
+      # Bedrock cross-region inference-profile id (bedrock) OR first-party alias (api-key).
+      model: { type: string, default: "us.anthropic.claude-sonnet-5" }
+      aws_region: { type: string, default: "us-east-1" }
+    secrets:
+      ANTHROPIC_API_KEY: { required: false }
+      AWS_ROLE_TO_ASSUME: { required: false }
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: read
+  deployments: read
+
+# One agent run per PR; a newer trigger cancels an in-flight loop.
+concurrency:
+  group: agent-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    # The agent job has contents:write + assumes an AWS role, so the trigger MUST
+    # be gated on the commenter's REPO PERMISSION, not just repo identity. We
+    # require author_association ∈ {OWNER, MEMBER, COLLABORATOR} (i.e. write
+    # access) — `repository.fork` alone is meaningless here (it describes the base
+    # repo, not who commented). The comment must also mention @claude and be on a PR.
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+    steps:
+      - name: Gate (write-access author + @claude mention on a PR; untrusted input via env)
+        id: gate
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          IS_PR: ${{ github.event.issue.pull_request != '' }}
+          # author_association is set by GitHub, not the commenter — trustworthy.
+          ASSOC: ${{ github.event.comment.author_association }}
+        run: |
+          proceed=false
+          # COMMENT_BODY is untrusted — only ever read as data, never eval'd.
+          case "$ASSOC" in
+            OWNER|MEMBER|COLLABORATOR) authorized=true ;;
+            *) authorized=false ;;
+          esac
+          if [ "$IS_PR" = "true" ] && [ "$authorized" = "true" ] && printf '%s' "$COMMENT_BODY" | grep -qi '@claude'; then
+            proceed=true
+          fi
+          echo "proceed=$proceed" >> "$GITHUB_OUTPUT"
+
+  agent:
+    needs: guard
+    if: needs.guard.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the agent pushes fix commits to the PR branch
+      pull-requests: write
+      checks: read
+      deployments: read
+      id-token: write # AWS OIDC for the Bedrock auth path
+    env:
+      MAX_ITERATIONS: ${{ inputs.max_iterations }}
+      BUDGET_USD: ${{ inputs.budget_usd }}
+      PR: ${{ github.event.issue.number }}
+      # The agent prompt. Built ONLY from trusted values (repo, PR number, caps) —
+      # the untrusted comment.body is never interpolated here (see the guard job).
+      AGENT_PROMPT: |
+        You are the autonomous preview-fix agent for PR #${{ github.event.issue.number }}
+        in ${{ github.repository }}. NEVER test a stale deployment.
+
+        Loop within these bounds — the hard per-run cap is --max-turns; treat
+        max_iterations=${{ inputs.max_iterations }} and budget_usd=${{ inputs.budget_usd }} as limits you MUST respect
+        (a harness that enforces them across invocations is the next phase — see docs/agent-loop.md):
+        1. Determine the PR head SHA you just pushed.
+        2. Run: node skills/preview-iterate/preview-skill.mjs watch
+                 --repo ${{ github.repository }} --pr ${{ github.event.issue.number }} --sha <head-sha>
+        3. On terminal `ready`: STOP — the preview is good; hand back to humans/tests.
+        4. On terminal `failed`: read failure.reason + failure.remediation, fix the
+           code, commit and push to the PR branch, then go to step 1 with the new SHA.
+        Do not push to any branch other than this PR's. Do not touch CI/workflow files.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+
+      # Bedrock auth path: assume an AWS role via OIDC (no Anthropic API key).
+      - name: Configure AWS credentials (OIDC, Bedrock auth)
+        if: inputs.auth == 'bedrock'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ inputs.aws_region }}
+
+      # The real agent. It drives the SHA-gated preview loop and iterates on a
+      # confirmed check failure, bounded by --max-turns (hard per-run cap) and the
+      # MAX_ITERATIONS / BUDGET_USD bounds the prompt is told to respect. The
+      # continue/stop contract lives in skills/preview-iterate/lib/agent-loop.mjs
+      # (unit-tested); hard harness-enforced multi-invocation looping via
+      # claude-code-base-action is the labeled next phase (see docs/agent-loop.md).
+      - name: Claude Code agent (Bedrock)
+        if: inputs.auth == 'bedrock'
+        uses: anthropics/claude-code-action@v1
+        with:
+          use_bedrock: "true"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          trigger_phrase: "@claude"
+          prompt: ${{ env.AGENT_PROMPT }}
+          claude_args: >-
+            --model ${{ inputs.model }}
+            --max-turns 15
+            --allowedTools Bash,Edit,Read,Write,Glob,Grep
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+
+      # Direct Anthropic API path (opt-in: pass auth: api-key + ANTHROPIC_API_KEY).
+      - name: Claude Code agent (Anthropic API)
+        if: inputs.auth == 'api-key'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          trigger_phrase: "@claude"
+          prompt: ${{ env.AGENT_PROMPT }}
+          claude_args: >-
+            --model ${{ inputs.model }}
+            --max-turns 15
+            --allowedTools Bash,Edit,Read,Write,Glob,Grep

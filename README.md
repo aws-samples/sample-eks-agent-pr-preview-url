@@ -1,92 +1,227 @@
-# eks-agent-pr-preview-url
+# PR Preview Environments on Amazon EKS — agent-first
 
+> **Give your coding agent a real URL to test against.**
+> Every pull request gets its own isolated deployment on Amazon EKS, at its own
+> URL. A coding agent (or a human) opens a PR, waits for the preview to go green
+> for *the exact commit it just pushed*, tests the live URL, and iterates on
+> failures — a per-PR preview loop, on your own cluster.
 
-## Getting started
+One Pull Request → one **Preview Environment** at its own URL: created on open,
+updated on every push (SHA-gated, so an agent never tests stale code), destroyed
+on close.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+<p align="center">
+  <img alt="End-to-end: a coding agent's PR becomes a testable preview URL — change → push → build → deploy to pr-N → SHA-gated readiness → test the live URL → iterate on failure → teardown on close." src="docs/diagrams/agent-flow.svg" width="960">
+</p>
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+---
 
-## Add your files
+## Why this exists
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+Coding agents write code fast, but they need somewhere real to test it —
+production-like, isolated, and reachable at a URL — *before* a human reviews the
+PR. This project gives every PR that environment on Amazon EKS, and ships the
+agent loop that drives it:
 
+- **The one rule — never test a stale deployment.** A preview URL is reused
+  across pushes, so after a fix the old pod may still be serving old code. The
+  loop gates on **both** the Check Run for the pushed SHA being green **and**
+  `GET /api/health` reporting that same SHA before it runs a single test.
+- **Two ways to drive it.** A **local interactive loop** (the hero: an agent
+  running in your repo with the `preview-iterate` skill) and an **autonomous CI
+  loop** (`@claude` on a PR, wired to the official Claude Code GitHub Action).
+- **Real infrastructure, one config file.** EKS Auto Mode, a shared ALB, ECR,
+  GitHub OIDC — all named from three values in `project.env`.
+
+---
+
+## Prerequisites
+
+**To try it locally on kind (no AWS):** [Docker](https://docs.docker.com/get-docker/),
+[kind](https://kind.sigs.k8s.io/), [kubectl](https://kubernetes.io/docs/tasks/tools/),
+[Helm](https://helm.sh/docs/intro/install/), Node.js ≥ 18, and `jq`.
+
+**To deploy to AWS EKS,** additionally: the [AWS CLI](https://docs.aws.amazon.com/cli/)
+(authenticated with **admin-level** credentials — the CDK step creates a VPC, NAT,
+ECR, and an IAM role), [eksctl](https://eksctl.io/), and the AWS CDK
+(`npx cdk`, installed by `make install`). See [`docs/runbook.md`](docs/runbook.md)
+for the exact IAM footprint and cost notes.
+
+## Quick start
+
+Two layers: try the loop **locally on kind** (no AWS) in minutes, then deploy to
+**AWS EKS** when you want real preview URLs.
+
+### 1. Configure (three values)
+
+```bash
+# Edit the three values in project.env directly (it's the file every script sources):
+#   PROJECT_NAME (default pr-preview), GITHUB_ORG, AWS_REGION
+source project.env
+make install                       # deps for app, skill, infra
 ```
-cd existing_repo
-git remote add origin https://gitlab.aws.dev/bmaguir/eks-agent-pr-preview-url.git
-git branch -M main
-git push -uf origin main
+
+> **Local overrides:** keep private/experimental values in `project.local.env`
+> (gitignored). `source project.env` loads it automatically when present, so your
+> local edits win without touching the tracked template.
+
+### 2. Try it locally on kind (no AWS, no database)
+
+```bash
+make kind-up                                   # kind + ingress-nginx + metrics-server
+make preview-up PR=42 SHA=$(git rev-parse --short HEAD)
+curl -s localhost:8080/pr-42/api/health | jq .  # → {"ready":true,"sha":"<pushed-sha>",...}
+make preview-down PR=42
 ```
 
-## Integrate with your tools
+Run the test suite any time with `make test` (see [Testing & CI](#testing--ci)).
 
-- [ ] [Set up project integrations](https://gitlab.aws.dev/bmaguir/eks-agent-pr-preview-url/-/settings/integrations)
+### 3. Deploy to AWS EKS
 
-## Collaborate with your team
+The default path provisions with **CDK (VPC + ECR + OIDC) + eksctl (the EKS Auto
+Mode cluster)** and needs **no database**:
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+```bash
+source project.env
+cd infra && npm ci && npx cdk bootstrap && npx cdk deploy PrPreviewNetwork PrPreviewCicd
+cd .. && ./scripts/render-eksctl-config.sh                 # fills eksctl config from CDK outputs
+eksctl create cluster -f eksctl/eksctl-cluster.rendered.yaml
+aws eks update-kubeconfig --name "$PROJECT_NAME" --region "$AWS_REGION"
+kubectl apply -f charts/preview-env/alb-ingressclass.yaml  # once per cluster
+./scripts/onboard-app.sh repo --repo "$GITHUB_ORG/<your-app>"   # scaffolds caller workflows
+```
 
-## Test and Deploy
+Open a PR in your app repo → the reusable workflow builds, deploys, and comments
+the preview URL. Full walkthrough (incl. the **optional database**, the opt-in
+pure-CDK cluster, and **host-mode**): [`docs/runbook.md`](docs/runbook.md).
 
-Use the built-in continuous integration in GitLab.
+### 4. Drive the agent loop
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+```bash
+# after you push a fix to a PR branch, record the SHA and:
+node skills/preview-iterate/preview-skill.mjs watch \
+  --repo "$GITHUB_ORG/<your-app>" --pr 42 --sha <pushed-sha>
+# exits 0 when the preview is READY for that SHA; exits 1 with a structured
+# failure.reason + remediation on failure — the loop an agent (or you) iterates on.
+```
 
-***
+For the unattended version, comment `@claude` on a PR (see the autonomous CI
+loop in [`docs/agent-loop.md`](docs/agent-loop.md)).
 
-# Editing this README
+---
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+## What's here
 
-## Suggestions for a good README
+| Path | What |
+| --- | --- |
+| `project.env` | The one config file — `project_name` / `github_org` / `aws_region` derive every resource name |
+| `app/` | Next.js reference workload (`output: standalone`); `/api/health` returns the build SHA; `/diagnostics` debug page |
+| `charts/preview-env/` | Helm chart for one Preview Environment — dual routing, guardrails (quota / limits / default-deny NetworkPolicy / PDB), optional ESO + access protection |
+| `infra/` | AWS CDK (TypeScript): VPC, ECR, GitHub OIDC deploy role, optional Aurora Serverless v2, opt-in EKS Auto Mode cluster (+ assertion & cdk-nag tests) |
+| `eksctl/` | The proven EKS Auto Mode cluster config (rendered from CDK outputs) |
+| `.github/workflows/` | `ci.yml` (test gate) + reusable `preview.yml`, `preview-teardown.yml`, `preview-sweep.yml`, `preview-agent.yml` |
+| `skills/` | Agent skills: `preview-iterate` (SHA-gated loop), `onboard-app` (onboard/offboard), `get-pr-preview-endpoint` (droppable URL resolver) |
+| `scripts/` | Cluster + preview operations (kind harness, onboard, render-eksctl, verify-host-mode, sweep, CI helpers) |
+| `docs/` | [Architecture](docs/ARCHITECTURE.md), [runbook](docs/runbook.md), [onboarding](docs/onboarding.md), [agent loop](docs/agent-loop.md), [host mode](docs/host-mode.md), [ABCA integration](docs/abca-integration.md), [CloudFront front-door](docs/design-cloudfront-frontdoor.md), [verification](docs/verification.md), [next steps](docs/next-steps.md), diagrams |
+| `scripts/demo/` | ABCA integration demo — submit a task, deploy the PR's preview, then screenshot **and test** the live URL back onto the PR ([docs/abca-integration.md](docs/abca-integration.md)) |
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+---
 
-## Name
-Choose a self-explaining name for your project.
+## Features
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+- **Auto preview per PR** at a branch-stable URL, updated on every push.
+- **SHA-gated readiness** so an agent never validates a stale deployment.
+- **Status surfaced into the PR:** a GitHub Deployment (`environment_url`) + a
+  Check Run (with a structured failure reason) + a bot comment. There is **no
+  control-plane service** — GitHub is the source of truth.
+- **Database optional:** the default needs none; opt in to Aurora Serverless v2
+  with **per-PR Postgres schema isolation** (`schema pr_<n>`) via External
+  Secrets Operator.
+- **Per-PR isolation + guardrails:** own namespace, ResourceQuota, LimitRange,
+  default-deny NetworkPolicy, PDB.
+- **Reliable teardown** on PR close, plus a scheduled sweep that reaps orphans.
+- **Two routing modes:** `path` (default, no DNS) and `host`
+  (`pr-<n>.<domain>`, image reuse) — host-mode routing is
+  [verifiable with no public domain](docs/host-mode.md).
+- **Optional ALB-OIDC access protection**, structured
+  logs + a per-deploy `time_to_ready` metric.
+- **Autonomous CI agent** (`@claude`) with write-access-author gate + iteration/cost caps.
+- **Optional HTTP Basic Auth** (`basicAuth.enabled`) at the app layer, `/api/health`
+  exempt so the readiness gate still works.
+- **Optional [CloudFront front-door](docs/design-cloudfront-frontdoor.md)** —
+  short-TTL **signed URLs** over a **private** ALB (CloudFront VPC Origin), for
+  access control stronger than a static password with trusted TLS and no public
+  domain. The ALB is not internet-reachable; built + verified on EKS Auto Mode.
+- **[ABCA integration](docs/abca-integration.md):** pairs with
+  [Autonomous Background Coding Agents](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents)
+  — ABCA opens a PR, this platform gives it a live preview URL and emits the
+  `deployment_status` ABCA screenshots back onto the PR. An optional **test-task**
+  then verifies the live preview (SHA-gate, routing, page renders, change is live)
+  and posts a pass/fail comment. A fully autonomous change → testable preview →
+  verified-and-tested loop.
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+---
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+## Configuration
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+Everything is named from **three values** in [`project.env`](project.env):
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+```bash
+PROJECT_NAME=pr-preview      # → cluster, ECR repo, IAM role, node profile, secret path, ALB group, CFN stacks
+GITHUB_ORG=your-org          # → the org whose repos may assume the deploy role (OIDC)
+AWS_REGION=us-east-1
+```
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+Change `PROJECT_NAME` and every AWS/Kubernetes resource name follows. The
+Kubernetes label domain used for selection and teardown (`preview.pr-preview/*`)
+is a fixed internal constant, so it never drifts when you rename resources.
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+---
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+## Testing & CI
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+`make test` runs the same suite the CI gate runs
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+| Suite | What it covers |
+| --- | --- |
+| bash lib | deploy + onboard/offboard helpers |
+| app unit | health/runtime/logger of the reference workload |
+| skill unit | SHA-gate decision logic + agent loop control |
+| helm render | both routing modes + guardrails + protection + ESO |
+| CDK | stack assertions + cdk-nag security gate |
+| native e2e | real build + standalone server (simple / slow-boot / multi-commit / multi-PR) |
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+Plus `actionlint` on workflows and `helm lint` on the chart.
+
+Full verification (incl. live-EKS proof): [`docs/verification.md`](docs/verification.md).
+
+---
+
+## Architecture
+
+Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full picture and the
+two diagrams. In one line: **GitHub Actions builds and `helm upgrade --install`s
+each PR into its own namespace on a shared ALB; readiness is proven by polling
+the real URL for the pushed SHA; status lives in GitHub Deployments + Check
+Runs; the agent loop reads that and iterates.**
+
+<p align="center">
+  <img alt="AWS services architecture: GitHub Actions → OIDC role + ECR → EKS Auto Mode cluster (per-PR pr-N namespaces, shared ALB from Ingress) in a VPC, with External Secrets Operator → Secrets Manager and an optional Aurora Serverless v2 with-data path." src="docs/diagrams/aws-architecture.svg" width="960">
+</p>
+
+---
+
+## Security & contributing
+
+- Preview access is **public by default**; opt into basic auth or ALB-OIDC
+  protection in the chart. The autonomous agent runs behind a **write-access-author
+  + `@claude` guard** and never interpolates untrusted PR/comment text into a command.
+- See [`CONTRIBUTING.md`](CONTRIBUTING.md) and
+  [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Report security issues via the
+  [AWS vulnerability reporting page](http://aws.amazon.com/security/vulnerability-reporting/),
+  not a public issue.
 
 ## License
-For open source projects, say how it is licensed.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+MIT-0. See [`LICENSE`](LICENSE) and [`NOTICE.txt`](NOTICE.txt).

@@ -1,0 +1,112 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "preview-env.name" . }}
+  labels:
+    {{- include "preview-env.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "preview-env.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "preview-env.labels" . | nindent 8 }}
+      annotations:
+        # Force a rollout when the image tag changes even if it's mutable.
+        preview.pr-preview/image-tag: {{ .Values.image.tag | quote }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # The node:22-alpine `node` user is UID/GID 1000. Kubernetes cannot
+        # verify a non-numeric image USER against runAsNonRoot, so pin the
+        # numeric UID/GID explicitly or the kubelet rejects the pod with
+        # CreateContainerConfigError.
+        runAsUser: {{ .Values.securityContext.runAsUser }}
+        runAsGroup: {{ .Values.securityContext.runAsGroup }}
+        fsGroup: {{ .Values.securityContext.runAsGroup }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: {{ include "preview-env.name" . }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: PREVIEW_ROUTING_MODE
+              value: {{ .Values.routing.mode | quote }}
+            - name: PREVIEW_BASE_PATH
+              value: {{ include "preview-env.basePath" . | quote }}
+            - name: PREVIEW_PR_NUMBER
+              value: {{ .Values.prNumber | quote }}
+            # Per-PR schema isolation: the app confines its data to
+            # this schema within the shared Aurora cluster.
+            - name: PREVIEW_DB_SCHEMA
+              value: {{ printf "pr_%s" (.Values.prNumber | toString) | quote }}
+            - name: PREVIEW_BOOT_DELAY_MS
+              value: {{ .Values.bootDelayMs | quote }}
+            # Keep the standalone server from writing telemetry traces into the
+            # read-only /app/.next (only /app/.next/cache is writable).
+            - name: NEXT_TELEMETRY_DISABLED
+              value: "1"
+            {{- if .Values.externalSecret.enabled }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "preview-env.name" . }}-db
+                  key: {{ .Values.externalSecret.remoteProperty }}
+            {{- else if .Values.databaseUrlInline }}
+            - name: DATABASE_URL
+              value: {{ .Values.databaseUrlInline | quote }}
+            {{- end }}
+            {{- if .Values.basicAuth.enabled }}
+            # Optional HTTP Basic Auth (app-layer middleware). base64("user:pass").
+            # /api/health stays exempt so the readiness gate keeps working.
+            - name: BASIC_AUTH_B64
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.basicAuth.secretName | default (printf "%s-basic-auth" (include "preview-env.name" .)) }}
+                  key: {{ .Values.basicAuth.secretKey | default "credentials" }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # Readiness gate: /api/health returns 503 until the boot delay elapses,
+          # so traffic only flows once the workload is truly serving.
+          readinessProbe:
+            httpGet:
+              path: {{ include "preview-env.basePath" . }}/api/health
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            httpGet:
+              path: {{ include "preview-env.basePath" . }}/api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            # readOnlyRootFilesystem is on, so give Next.js writable scratch paths.
+            - name: tmp
+              mountPath: /tmp
+            - name: next-cache
+              mountPath: /app/.next/cache
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: next-cache
+          emptyDir: {}

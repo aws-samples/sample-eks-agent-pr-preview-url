@@ -1,0 +1,69 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "preview-env.name" . }}
+  labels:
+    {{- include "preview-env.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.routing.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if .Values.protect.enabled }}
+    # Preview access protection : ALB authenticate-oidc. Unauthenticated
+    # requests are redirected to the IdP. The readiness gate must reach
+    # /api/health — it polls from inside the VPC / via a bypass, not through OIDC.
+    alb.ingress.kubernetes.io/auth-type: oidc
+    alb.ingress.kubernetes.io/auth-on-unauthenticated-request: authenticate
+    alb.ingress.kubernetes.io/auth-idp-oidc: |
+      {"issuer":"{{ .Values.protect.oidc.issuer }}","authorizationEndpoint":"{{ .Values.protect.oidc.authorizationEndpoint }}","tokenEndpoint":"{{ .Values.protect.oidc.tokenEndpoint }}","userInfoEndpoint":"{{ .Values.protect.oidc.userInfoEndpoint }}","secretName":"{{ .Values.protect.oidc.secretName }}"}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.routing.ingressClassName }}
+  rules:
+    - {{- $host := include "preview-env.host" . }}
+      {{- if $host }}
+      host: {{ $host | quote }}
+      {{- end }}
+      http:
+        paths:
+          {{- if eq .Values.routing.mode "path" }}
+          # path mode: route /pr-<n> (and everything under it) to the service.
+          # pathType: Prefix matches by path ELEMENT (k8s semantics), so /pr-5
+          # does NOT match /pr-51 — element-wise, not string-prefix. NOTE: on raw
+          # AWS ALB, listener rules are string-glob; the AWS Load Balancer
+          # Controller translates pathType:Prefix into an anchored pattern
+          # (`/pr-5` and `/pr-5/*`), which likewise does not catch `/pr-51`.
+          - path: /{{ include "preview-env.prSlug" . }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "preview-env.name" . }}
+                port:
+                  number: {{ .Values.service.port }}
+          {{- else }}
+          # host mode: the subdomain identifies the PR, so serve at root.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "preview-env.name" . }}
+                port:
+                  number: {{ .Values.service.port }}
+          {{- end }}
+    {{- $commitHost := include "preview-env.commitHost" . }}
+    {{- if $commitHost }}
+    # Per-commit immutable host (host mode): pr-<n>-<shortSha>.<domain> → same
+    # service. The commit-pinned "View deployment" address (Phase 1).
+    - host: {{ $commitHost | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "preview-env.name" . }}
+                port:
+                  number: {{ .Values.service.port }}
+    {{- end }}

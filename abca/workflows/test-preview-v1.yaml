@@ -1,0 +1,79 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# test-preview-v1 — an ABCA workflow that TESTS a live preview URL and posts a
+# clean pass/fail comment on the PR, WITHOUT opening a PR or pushing anything.
+#
+# It is a trimmed fork of ABCA's stock `coding/pr-review-v1`: same read-only,
+# repo-bound, pr_number shape (so `ensure_pr strategy: resolve` finds the existing
+# PR and opens none), but the prompt targets a live preview URL instead of doing a
+# code review. This file lives HERE (in the preview-platform repo) as the canonical
+# source; to make ABCA run it, copy it into the ABCA checkout under
+# `agent/workflows/coding/test-preview-v1.yaml` and redeploy ABCA's CDK
+# (`npx cdk deploy backgroundagent-dev`), then reference it as
+# workflow_ref: coding/test-preview-v1 in the CreateTaskRequest.
+#
+# Where ABCA's CDK cannot be redeployed (no ABCA checkout / no CDK access), the
+# local runner `scripts/demo/test-preview.sh` performs the IDENTICAL checks and
+# posts the IDENTICAL comment — the same fallback relationship the screenshot
+# pipeline has with `scripts/demo/screenshot-preview.sh`.
+
+ref: coding/test-preview-v1
+version: 1
+requires_repo: true          # repo-bound so the task can resolve + comment on the PR
+read_only: true              # Cedar denies Write/Edit tools; gh/Bash network calls still allowed
+required_inputs:
+  all_of: [pr_number]        # gates the structured pr_number field on CreateTaskRequest
+
+repo_config:
+  discover: true
+
+# Tools trimmed to what a URL test needs (no Write/Edit). WebFetch + Bash let the
+# agent curl the preview and its /api/health, and post the result via `gh`.
+tools: [Bash, Read, Glob, Grep, WebFetch]
+
+steps:
+  - kind: setup            # clone + checkout the PR branch (gives the agent the diff)
+    name: setup
+  - kind: ensure_pr        # resolve the EXISTING PR; opens none, pushes nothing
+    name: resolve_pr
+    strategy: resolve
+  - kind: agent            # run the test prompt below
+    name: test_preview
+
+terminal_outcomes:
+  primary: pr_url          # the resolved PR (unchanged); the deliverable is the comment
+
+prompt:
+  placeholders: [pr_number, task_description, repo_url]
+  # task_description carries the preview URL + the expected visible change (the glue
+  # in abca-preview-controller.sh builds it — ABCA has no structured URL field).
+  text: |
+    You are a preview TEST agent. A pull request (#{pr_number}) has been deployed to
+    a live preview environment. Your ONLY job is to verify the live preview and post
+    ONE clean pass/fail comment on the PR. You must NOT edit code, push commits, or
+    open a PR — you only read and report.
+
+    The task input contains the preview URL to test and the change to expect:
+    ---
+    {task_description}
+    ---
+
+    Do this:
+    1. Extract the preview URL from the task input above.
+    2. REACHABILITY GATE: curl the preview URL. If it does not return HTTP 200
+       (expired/invalid signed URL, or unreachable), STOP and post an "⚠️ inconclusive"
+       comment stating the HTTP code — never report pass/fail on a page you can't load.
+    3. curl `<preview-base>/api/health` (strip any ?query — health is on an unsigned
+       behavior). Verify: `ready` is true; `sha` equals the PR head SHA (fresh-deploy
+       gate — never pass on stale code); `prNumber` equals {pr_number} (routing).
+    4. Inspect the diff of this PR (you have the checked-out branch) to learn the
+       visible change, and confirm the rendered preview page contains that change.
+    5. Post ONE comment via `gh pr comment {pr_number} --repo {repo_url} --body "..."`:
+       - Header: "✅ Preview tested — all N checks passed" or
+         "❌ Preview tested — M of N checks failed".
+       - A Markdown table of the individual checks (fresh-deploy SHA, readiness,
+         routing, page renders, change-is-live), each ✅/❌ with a one-line detail.
+       - The tested SHA and a query-stripped preview URL.
+       - A trailing note: "opens no PR, pushes nothing."
+    Keep it clean and direct. Do not open a PR. Do not push.

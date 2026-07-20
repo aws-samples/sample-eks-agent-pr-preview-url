@@ -1,0 +1,59 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# Teardown on PR close/merge. Reusable, called from the app repo:
+#
+#   on: { pull_request: { types: [closed] } }
+#   jobs:
+#     teardown:
+#       uses: your-org/samples-eks-agent-pr-preview-url/.github/workflows/preview-teardown.yml@v1
+#       permissions: { contents: read, deployments: write, id-token: write }
+#       secrets: inherit
+name: preview-teardown
+
+on:
+  workflow_call:
+    inputs:
+      aws_region: { type: string, default: "us-east-1" }
+      eks_cluster: { type: string, default: "pr-preview" }
+    secrets:
+      AWS_DEPLOY_ROLE_ARN: { required: true }
+
+permissions:
+  contents: read
+  deployments: write
+  id-token: write
+
+jobs:
+  teardown:
+    runs-on: ubuntu-latest
+    env:
+      PR: ${{ github.event.pull_request.number }}
+      NS: pr-${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+      - run: aws eks update-kubeconfig --name "${{ inputs.eks_cluster }}" --region "${{ inputs.aws_region }}"
+      - name: Drop per-PR DB schema — before the namespace goes
+        run: bash scripts/drop-schema.sh "$PR" "$NS" || echo "schema drop best-effort; continuing"
+      - name: helm uninstall + delete namespace (with verification)
+        run: |
+          helm uninstall web -n "$NS" 2>/dev/null || echo "release already gone"
+          kubectl delete namespace "$NS" --ignore-not-found --wait=true --timeout=120s || true
+          # Verify it actually went away — no more fire-and-forget.
+          if kubectl get ns "$NS" >/dev/null 2>&1; then
+            echo "::warning::namespace $NS still present after delete; the scheduled sweep will reap it"
+          else
+            echo "namespace $NS confirmed deleted"
+          fi
+      - name: Mark deployment inactive
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const envName = `preview/pr-${process.env.PR}`;
+            const deps = await github.rest.repos.listDeployments({ owner: context.repo.owner, repo: context.repo.repo, environment: envName });
+            for (const d of deps.data) {
+              await github.rest.repos.createDeploymentStatus({ owner: context.repo.owner, repo: context.repo.repo, deployment_id: d.id, state: 'inactive' });
+            }

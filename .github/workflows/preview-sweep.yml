@@ -1,0 +1,39 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# Scheduled teardown backstop. Reconciles preview namespaces against
+# the set of currently-open PRs and reaps orphans the close event missed.
+name: preview-sweep
+
+on:
+  schedule:
+    - cron: "0 * * * *" # hourly
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: read # github-script lists open PRs to reconcile orphans
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          # Set repo variables AWS_REGION / EKS_CLUSTER to match your deployment;
+          # defaults mirror project.env (aws_region=us-east-1, project_name=pr-preview).
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      - run: aws eks update-kubeconfig --name "${{ vars.EKS_CLUSTER || 'pr-preview' }}" --region "${{ vars.AWS_REGION || 'us-east-1' }}"
+      - name: Compute open PR set
+        id: open
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prs = await github.paginate(github.rest.pulls.list, { owner: context.repo.owner, repo: context.repo.repo, state: 'open', per_page: 100 });
+            core.setOutput('csv', prs.map(p => p.number).join(','));
+      - name: Reconcile + reap orphaned previews
+        env:
+          OPEN_PRS: ${{ steps.open.outputs.csv }}
+        run: bash scripts/preview-sweep.sh "$OPEN_PRS"

@@ -1,0 +1,14 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+apiVersion: v2
+name: preview-env
+description: A single per-PR Preview Environment for the pr-preview platform
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - preview
+  - pull-request
+  - ephemeral
+maintainers:
+  - name: pr-preview

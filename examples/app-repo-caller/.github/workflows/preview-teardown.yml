@@ -1,0 +1,16 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# EXAMPLE — copy into the app repo alongside preview.yml. Tears the preview down
+# when the PR closes or merges.
+name: preview-teardown
+on:
+  pull_request:
+    types: [closed]
+jobs:
+  teardown:
+    uses: your-org/samples-eks-agent-pr-preview-url/.github/workflows/preview-teardown.yml@v1
+    permissions:
+      contents: read
+      deployments: write
+      id-token: write
+    secrets: inherit

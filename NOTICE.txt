@@ -1,0 +1,36 @@
+PR Preview Environments on Amazon EKS (agent-first)
+
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+Licensed under the MIT No Attribution license (the "License"). You may not
+use this file except in compliance with the License. A copy of the License
+is in the "LICENSE" file accompanying this file. This file is distributed
+on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express
+or implied. See the License for the specific language governing permissions
+and limitations under the License.
+
+**********************
+THIRD PARTY COMPONENTS
+**********************
+This software retrieves or incorporates third-party software at install
+time or run time. Those packages are subject to their own license terms.
+The list below is provided for convenience and is not exhaustive; consult
+each package's documentation for authoritative licensing information.
+
+  - Next.js (MIT) -- https://nextjs.org
+  - React / react-dom (MIT) -- https://github.com/facebook/react
+  - node-postgres / pg (MIT) -- https://github.com/brianc/node-postgres
+  - AWS CDK / aws-cdk-lib (Apache-2.0) -- https://github.com/aws/aws-cdk
+  - constructs (Apache-2.0) -- https://github.com/aws/constructs
+  - cdk-nag (Apache-2.0) -- https://github.com/cdklabs/cdk-nag
+  - TypeScript (Apache-2.0) -- https://github.com/microsoft/TypeScript
+  - Vitest (MIT) -- https://github.com/vitest-dev/vitest
+  - Helm (Apache-2.0) -- https://github.com/helm/helm
+  - eksctl (Apache-2.0) -- https://github.com/eksctl-io/eksctl
+  - External Secrets Operator (Apache-2.0) -- https://github.com/external-secrets/external-secrets
+  - GitHub Actions used at runtime:
+      actions/checkout, actions/setup-node, actions/github-script (MIT)
+      aws-actions/configure-aws-credentials (Apache-2.0)
+      anthropics/claude-code-action (see its repository for license)
+
+Full dependency and version information is recorded in the per-package
+package.json / package-lock.json files and in infra/, charts/, and .github/.

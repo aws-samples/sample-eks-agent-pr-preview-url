@@ -1,0 +1,11 @@
+Preview Environment for PR #{{ .Values.prNumber }} deployed.
+
+Routing mode: {{ .Values.routing.mode }}
+{{- if eq .Values.routing.mode "host" }}
+URL:  http(s)://{{ include "preview-env.prSlug" . }}.{{ .Values.routing.baseDomain }}/
+{{- else }}
+URL:  http(s)://<ingress-address>/{{ include "preview-env.prSlug" . }}/
+Health: .../{{ include "preview-env.prSlug" . }}/api/health
+{{- end }}
+
+Teardown: helm uninstall web -n {{ .Release.Namespace }} && kubectl delete ns {{ .Release.Namespace }}

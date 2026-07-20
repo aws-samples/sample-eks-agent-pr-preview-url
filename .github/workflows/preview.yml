@@ -1,0 +1,201 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# Reusable preview workflow.
+#
+# The platform repo publishes this; an app repo calls it from a 5-line caller:
+#
+#   jobs:
+#     preview:
+#       uses: your-org/samples-eks-agent-pr-preview-url/.github/workflows/preview.yml@v1
+#       permissions: { contents: read, deployments: write, checks: write, id-token: write, pull-requests: write }
+#       secrets: inherit
+#
+# It builds + pushes to ECR, helm-installs into namespace pr-<n>, polls the real
+# URL for readiness, and writes a GitHub Deployment (environment_url) + Check Run
+# (status + structured failure reason). Teardown lives in preview-teardown.yml.
+name: preview
+
+on:
+  workflow_call:
+    inputs:
+      routing_mode:
+        description: "host | path"
+        type: string
+        default: "path"
+      base_domain:
+        description: "host-mode base domain (pr-N.<base_domain>)"
+        type: string
+        default: "preview.example.com"
+      ingress_host_base:
+        description: "URL base used to poll readiness (path mode), e.g. https://<alb-host>"
+        type: string
+        default: ""
+      aws_region:
+        type: string
+        default: "us-east-1"
+      eks_cluster:
+        type: string
+        default: "pr-preview"
+      ecr_repository:
+        type: string
+        default: "pr-preview/app"
+      external_secret:
+        description: "sync DB creds from Secrets Manager via ESO (needs a ClusterSecretStore)"
+        type: boolean
+        default: true
+    secrets:
+      AWS_DEPLOY_ROLE_ARN:
+        required: true
+
+# One run per PR; a newer commit cancels the older in-flight run.
+concurrency:
+  group: preview-pr-${{ github.event.pull_request.number || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  deployments: write
+  checks: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  deploy:
+    if: github.event.pull_request.state != 'closed'
+    runs-on: ubuntu-latest
+    env:
+      PR: ${{ github.event.pull_request.number }}
+      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      NS: pr-${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve short SHA + image tag
+        id: meta
+        run: |
+          short="$(echo "$SHA" | cut -c1-12)"
+          echo "short_sha=$short" >> "$GITHUB_OUTPUT"
+          echo "image_tag=sha-$short" >> "$GITHUB_OUTPUT"
+
+      # Mark the PR's commit as deploy-in-progress immediately.
+      - name: Create GitHub Deployment (in_progress)
+        id: gh_deploy
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const dep = await github.rest.repos.createDeployment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              ref: process.env.SHA, environment: `preview/pr-${process.env.PR}`,
+              auto_merge: false, required_contexts: [], transient_environment: true,
+            });
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner, repo: context.repo.repo,
+              deployment_id: dep.data.id, state: 'in_progress',
+            });
+            core.setOutput('id', dep.data.id);
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & push image (path-mode bakes basePath)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          push: true
+          provenance: false
+          tags: ${{ steps.ecr.outputs.registry }}/${{ inputs.ecr_repository }}:${{ steps.meta.outputs.image_tag }}
+          build-args: |
+            GIT_SHA=${{ steps.meta.outputs.short_sha }}
+            PREVIEW_ROUTING_MODE=${{ inputs.routing_mode }}
+            PREVIEW_BASE_PATH=${{ inputs.routing_mode == 'path' && format('/pr-{0}', env.PR) || '' }}
+          cache-from: type=registry,ref=${{ steps.ecr.outputs.registry }}/${{ inputs.ecr_repository }}:buildcache
+          cache-to: type=registry,ref=${{ steps.ecr.outputs.registry }}/${{ inputs.ecr_repository }}:buildcache,mode=max
+
+      - name: kubeconfig for EKS
+        run: aws eks update-kubeconfig --name "${{ inputs.eks_cluster }}" --region "${{ inputs.aws_region }}"
+
+      - name: Helm upgrade --install
+        run: |
+          # Label the namespace so the teardown sweep can select it (the sweep
+          # matches namespaces, and --create-namespace leaves them unlabeled).
+          kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl label namespace "$NS" app.kubernetes.io/part-of=preview-platform \
+            "preview.pr-preview/pr-number=$PR" --overwrite
+          # Bounded retry for transient API/registry hiccups. --atomic
+          # rolls back a failed attempt, so a retry starts clean.
+          n=0; until [ $n -ge 3 ]; do
+            helm upgrade --install web ./charts/preview-env \
+              --namespace "$NS" --create-namespace --atomic --timeout 5m \
+              --set prNumber="$PR" \
+              --set routing.mode="${{ inputs.routing_mode }}" \
+              --set routing.baseDomain="${{ inputs.base_domain }}" \
+              --set routing.ingressClassName=alb \
+              --set externalSecret.enabled=${{ inputs.external_secret }} \
+              --set commitSha="${{ steps.meta.outputs.short_sha }}" \
+              --set image.repository="${{ steps.ecr.outputs.registry }}/${{ inputs.ecr_repository }}" \
+              --set image.tag="${{ steps.meta.outputs.image_tag }}" \
+              --set commonLabels.git-sha="${{ steps.meta.outputs.short_sha }}" && break
+            n=$((n+1)); echo "helm attempt $n failed; retrying in $((n*10))s"; sleep $((n*10))
+          done
+          [ $n -lt 3 ]
+
+      # Readiness gate: poll the REAL url until 200 AND health.sha == ours.
+      - name: Wait for readiness via the real URL
+        id: ready
+        run: bash scripts/ci-wait-ready.sh
+        env:
+          ROUTING_MODE: ${{ inputs.routing_mode }}
+          BASE_DOMAIN: ${{ inputs.base_domain }}
+          INGRESS_HOST_BASE: ${{ inputs.ingress_host_base }}
+          WANT_SHA: ${{ steps.meta.outputs.short_sha }}
+          NS: ${{ env.NS }}
+
+      - name: Publish success (Deployment + Check Run + PR comment)
+        if: success()
+        uses: actions/github-script@v7
+        env:
+          PREVIEW_URL: ${{ steps.ready.outputs.url }}
+        with:
+          script: |
+            const url = process.env.PREVIEW_URL;
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner, repo: context.repo.repo,
+              deployment_id: '${{ steps.gh_deploy.outputs.id }}',
+              state: 'success', environment_url: url, log_url: url,
+            });
+            await github.rest.checks.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              name: 'preview', head_sha: process.env.SHA, status: 'completed', conclusion: 'success',
+              output: { title: 'Preview ready', summary: `Preview deployed.\n\nURL: ${url}\nSHA: ${{ steps.meta.outputs.short_sha }}\nrouting: ${{ inputs.routing_mode }}` },
+            });
+            // Upsert the bot comment.
+            const marker = '<!-- pr-preview -->';
+            const body = `${marker}\n🟢 **Preview ready** for \`${process.env.SHA.slice(0,12)}\`\n\n${url}/diagnostics`;
+            const { data: comments } = await github.rest.issues.listComments({ owner: context.repo.owner, repo: context.repo.repo, issue_number: process.env.PR });
+            const existing = comments.find(c => c.body?.includes(marker));
+            if (existing) await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: existing.id, body });
+            else await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: process.env.PR, body });
+
+      - name: Publish failure (structured reason)
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const reason = '${{ steps.ready.outputs.failure_reason }}' || 'DeployFailed';
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner, repo: context.repo.repo,
+              deployment_id: '${{ steps.gh_deploy.outputs.id }}', state: 'failure',
+            });
+            await github.rest.checks.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              name: 'preview', head_sha: process.env.SHA, status: 'completed', conclusion: 'failure',
+              output: { title: 'Preview failed', summary: `reason: ${reason}\n\nThe agent loop reads this field to decide its next action.` },
+            });

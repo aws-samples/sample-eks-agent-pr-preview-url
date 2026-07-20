@@ -1,0 +1,45 @@
+# dependencies
+node_modules/
+**/node_modules/
+
+# next.js
+app/.next/
+app/out/
+
+# cdk
+infra/cdk.out/
+infra/.cdk.staging/
+# CDK context cache — pins account id + AZ topology; never commit (regenerated locally).
+infra/cdk.context.json
+
+# rendered-from-CDK eksctl config (contains live VPC/subnet ids)
+eksctl/eksctl-cluster.rendered.yaml
+
+# local project config override (project.env is the committed template)
+project.local.env
+
+# test / e2e artifacts
+coverage/
+e2e/.artifacts/
+e2e/results/*.json
+playwright-report/
+test-results/
+
+# env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+kubeconfig*
+
+# os
+.DS_Store
+*.log
+
+# build info
+app/tsconfig.tsbuildinfo
+e2e/last-run.log
+cdk.out/
+infra/cdk.out/
+.ash/ash_output/
+.wayfinder/

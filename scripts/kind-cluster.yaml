@@ -1,0 +1,20 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# kind cluster for local end-to-end testing of the preview platform.
+# Maps host :8080 -> ingress-nginx so previews are reachable from the host as
+# http://localhost:8080/pr-<n>/  (path mode — the v1 active routing mode).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: pr-preview
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 8080
+        protocol: TCP

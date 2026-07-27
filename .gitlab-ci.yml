@@ -2,21 +2,14 @@
 # SPDX-License-Identifier: MIT-0
 #
 # GitLab CI/CD pipeline for PR Preview Environments on EKS.
-# Equivalent of the GitHub Actions preview.yml + preview-teardown.yml workflows.
 #
 # Prerequisites:
 #   1. GitLab OIDC provider registered in AWS IAM (see scripts/setup-gitlab-oidc.sh)
 #   2. ONE CI/CD variable (Settings → CI/CD → Variables, Protected + Masked):
 #        AWS_DEPLOY_ROLE_ARN  — arn:aws:iam::414029132545:role/pr-preview-gitlab-deploy
 #   3. The deploy role trusts the GitLab OIDC provider for this project.
-#
-# That's it. No other secrets or tokens needed:
-#   - AWS auth: handled by GitLab OIDC (id_tokens) → sts:AssumeRoleWithWebIdentity
-#   - MR comments: handled by CI_JOB_TOKEN (built-in, no setup)
-#   - All platform config is hardcoded below (matches project.env).
 
 variables:
-  # Platform config (mirrors project.env — change here if you change there)
   AWS_REGION: "us-east-1"
   AWS_ACCOUNT_ID: "414029132545"
   EKS_CLUSTER_NAME: "pr-preview"
@@ -30,31 +23,14 @@ stages:
   - deploy
   - teardown
 
-# --- Reusable script fragments -------------------------------------------------
-# AWS CLI install for Alpine (pip-based — the static binary needs glibc).
-.install-awscli: &install-awscli
-  - apk add --no-cache python3 py3-pip jq >/dev/null 2>&1
-  - pip3 install --quiet --break-system-packages awscli
-
-# Assume the deploy role via OIDC (expects GITLAB_OIDC_TOKEN and AWS_DEPLOY_ROLE_ARN).
-.assume-role: &assume-role
-  - >
-    STS_OUTPUT=$(aws sts assume-role-with-web-identity
-    --role-arn "${AWS_DEPLOY_ROLE_ARN}"
-    --role-session-name "gitlab-ci-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
-    --web-identity-token "${GITLAB_OIDC_TOKEN}"
-    --duration-seconds 3600
-    --output json)
-  - export AWS_ACCESS_KEY_ID=$(echo "$STS_OUTPUT" | jq -r '.Credentials.AccessKeyId')
-  - export AWS_SECRET_ACCESS_KEY=$(echo "$STS_OUTPUT" | jq -r '.Credentials.SecretAccessKey')
-  - export AWS_SESSION_TOKEN=$(echo "$STS_OUTPUT" | jq -r '.Credentials.SessionToken')
-
 # --------------------------------------------------------------------------
-# MR Preview Build — triggered on merge request open/update
+# MR Preview Build
 # --------------------------------------------------------------------------
 preview-build:
   stage: build
-  image: docker:27
+  # Use the AWS CLI image as the primary — it has a working aws binary.
+  # Docker CLI is added via apk for image build/push.
+  image: amazon/aws-cli:2.22.35
   services:
     - docker:27-dind
   rules:
@@ -63,10 +39,22 @@ preview-build:
     GITLAB_OIDC_TOKEN:
       aud: https://gitlab.aws-dev
   variables:
-    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
   before_script:
-    - *install-awscli
-    - *assume-role
+    # Install Docker CLI into the AWS CLI image (Amazon Linux 2023 based)
+    - yum install -y docker >/dev/null 2>&1
+    # Assume the deploy role via OIDC
+    - >
+      STS_OUTPUT=$(aws sts assume-role-with-web-identity
+      --role-arn "${AWS_DEPLOY_ROLE_ARN}"
+      --role-session-name "gitlab-ci-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
+      --web-identity-token "${GITLAB_OIDC_TOKEN}"
+      --duration-seconds 3600
+      --output json)
+    - export AWS_ACCESS_KEY_ID=$(echo "$STS_OUTPUT" | jq -r '.Credentials.AccessKeyId')
+    - export AWS_SECRET_ACCESS_KEY=$(echo "$STS_OUTPUT" | jq -r '.Credentials.SecretAccessKey')
+    - export AWS_SESSION_TOKEN=$(echo "$STS_OUTPUT" | jq -r '.Credentials.SessionToken')
     # Login to ECR
     - aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
   script:
@@ -89,7 +77,7 @@ preview-build:
 # --------------------------------------------------------------------------
 preview-deploy:
   stage: deploy
-  image: alpine/k8s:1.31.2
+  image: amazon/aws-cli:2.22.35
   needs: ["preview-build"]
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
@@ -97,8 +85,14 @@ preview-deploy:
     GITLAB_OIDC_TOKEN:
       aud: https://gitlab.aws-dev
   before_script:
-    - apk add --no-cache python3 py3-pip jq >/dev/null 2>&1
-    - pip3 install --quiet --break-system-packages awscli
+    # Install kubectl and helm into the AWS CLI image
+    - |
+      curl -sSLO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
+      chmod +x kubectl && mv kubectl /usr/local/bin/
+    - |
+      curl -sSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar xz
+      mv linux-amd64/helm /usr/local/bin/ && rm -rf linux-amd64
+    # Assume the deploy role via OIDC
     - >
       STS_OUTPUT=$(aws sts assume-role-with-web-identity
       --role-arn "${AWS_DEPLOY_ROLE_ARN}"
@@ -141,7 +135,7 @@ preview-deploy:
       --set image.tag="${IMAGE_TAG}"
       --set image.pullPolicy=Always
       --wait --timeout 4m
-    # Discover the ALB hostname from the Ingress (no hardcoded ALB needed)
+    # Discover the ALB hostname from the Ingress
     - |
       echo "Waiting for Ingress to get an ALB address..."
       for i in $(seq 1 30); do
@@ -163,7 +157,7 @@ preview-deploy:
       READY=false
       while [ "$(date +%s)" -lt "$DEADLINE" ]; do
         RESPONSE=$(curl -s -m 5 "${HEALTH_URL}" 2>/dev/null || true)
-        SHA_GOT=$(echo "${RESPONSE}" | grep -o '"sha":"[^"]*"' | cut -d'"' -f4 || true)
+        SHA_GOT=$(echo "${RESPONSE}" | jq -r '.sha // empty' 2>/dev/null || true)
         if [ "${SHA_GOT}" = "${CI_COMMIT_SHORT_SHA}" ]; then
           echo "Preview is live and serving the correct SHA."
           READY=true
@@ -189,19 +183,18 @@ preview-deploy:
       **Namespace:** \`pr-${PR_NUMBER}\`
 
       The preview will be torn down automatically when this MR is merged or closed." \
-        || echo "Note: Could not post MR comment (CI_JOB_TOKEN may lack notes permission)."
+        || echo "Note: Could not post MR comment."
   environment:
     name: preview/pr-${CI_MERGE_REQUEST_IID}
-    url: http://${ALB_HOST}/pr-${CI_MERGE_REQUEST_IID}/
     on_stop: preview-teardown
     auto_stop_in: 1 week
 
 # --------------------------------------------------------------------------
-# MR Preview Teardown — auto-triggered on MR close/merge via environment stop
+# MR Preview Teardown
 # --------------------------------------------------------------------------
 preview-teardown:
   stage: teardown
-  image: alpine/k8s:1.31.2
+  image: amazon/aws-cli:2.22.35
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
       when: manual
@@ -213,8 +206,12 @@ preview-teardown:
     name: preview/pr-${CI_MERGE_REQUEST_IID}
     action: stop
   before_script:
-    - apk add --no-cache python3 py3-pip jq >/dev/null 2>&1
-    - pip3 install --quiet --break-system-packages awscli
+    - |
+      curl -sSLO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
+      chmod +x kubectl && mv kubectl /usr/local/bin/
+    - |
+      curl -sSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar xz
+      mv linux-amd64/helm /usr/local/bin/ && rm -rf linux-amd64
     - >
       STS_OUTPUT=$(aws sts assume-role-with-web-identity
       --role-arn "${AWS_DEPLOY_ROLE_ARN}"

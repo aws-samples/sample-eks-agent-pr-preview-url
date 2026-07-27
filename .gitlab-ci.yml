@@ -1,0 +1,242 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# GitLab CI/CD pipeline for PR Preview Environments on EKS.
+# Equivalent of the GitHub Actions preview.yml + preview-teardown.yml workflows.
+#
+# Prerequisites:
+#   1. GitLab OIDC provider registered in AWS IAM (see scripts/setup-gitlab-oidc.sh)
+#   2. ONE CI/CD variable (Settings → CI/CD → Variables, Protected + Masked):
+#        AWS_DEPLOY_ROLE_ARN  — arn:aws:iam::414029132545:role/pr-preview-gitlab-deploy
+#   3. The deploy role trusts the GitLab OIDC provider for this project.
+#
+# That's it. No other secrets or tokens needed:
+#   - AWS auth: handled by GitLab OIDC (id_tokens) → sts:AssumeRoleWithWebIdentity
+#   - MR comments: handled by CI_JOB_TOKEN (built-in, no setup)
+#   - All platform config is hardcoded below (matches project.env).
+
+variables:
+  # Platform config (mirrors project.env — change here if you change there)
+  AWS_REGION: "us-east-1"
+  AWS_ACCOUNT_ID: "414029132545"
+  EKS_CLUSTER_NAME: "pr-preview"
+  ECR_REPOSITORY: "pr-preview/app"
+  ROUTING_MODE: "path"
+  HELM_CHART_PATH: "charts/preview-env"
+  HELM_RELEASE_NAME: "web"
+
+stages:
+  - build
+  - deploy
+  - teardown
+
+# --- Reusable hidden job for OIDC auth ----------------------------------------
+.aws-oidc-auth:
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: https://gitlab.aws-dev
+  before_script:
+    - apk add --no-cache aws-cli >/dev/null 2>&1
+    # Assume the deploy role via GitLab OIDC — no stored credentials needed.
+    - >
+      STS_OUTPUT=$(aws sts assume-role-with-web-identity
+      --role-arn "${AWS_DEPLOY_ROLE_ARN}"
+      --role-session-name "gitlab-ci-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
+      --web-identity-token "${GITLAB_OIDC_TOKEN}"
+      --duration-seconds 3600
+      --output json)
+    - export AWS_ACCESS_KEY_ID=$(echo "$STS_OUTPUT" | grep -o '"AccessKeyId"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
+    - export AWS_SECRET_ACCESS_KEY=$(echo "$STS_OUTPUT" | grep -o '"SecretAccessKey"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
+    - export AWS_SESSION_TOKEN=$(echo "$STS_OUTPUT" | grep -o '"SessionToken"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
+
+# --------------------------------------------------------------------------
+# MR Preview Build — triggered on merge request open/update
+# --------------------------------------------------------------------------
+preview-build:
+  stage: build
+  image: docker:27
+  services:
+    - docker:27-dind
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: https://gitlab.aws-dev
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - apk add --no-cache aws-cli >/dev/null 2>&1
+    - >
+      STS_OUTPUT=$(aws sts assume-role-with-web-identity
+      --role-arn "${AWS_DEPLOY_ROLE_ARN}"
+      --role-session-name "gitlab-ci-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
+      --web-identity-token "${GITLAB_OIDC_TOKEN}"
+      --duration-seconds 3600
+      --output json)
+    - export AWS_ACCESS_KEY_ID=$(echo "$STS_OUTPUT" | grep -o '"AccessKeyId"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
+    - export AWS_SECRET_ACCESS_KEY=$(echo "$STS_OUTPUT" | grep -o '"SecretAccessKey"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
+    - export AWS_SESSION_TOKEN=$(echo "$STS_OUTPUT" | grep -o '"SessionToken"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
+    # Login to ECR
+    - aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+  script:
+    - export IMAGE_TAG="sha-${CI_COMMIT_SHORT_SHA}"
+    - export FULL_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
+    - export PR_NUMBER="${CI_MERGE_REQUEST_IID}"
+    # Build the image with preview base path baked in (path mode)
+    - >
+      docker build
+      --build-arg GIT_SHA="${CI_COMMIT_SHORT_SHA}"
+      --build-arg PREVIEW_ROUTING_MODE="${ROUTING_MODE}"
+      --build-arg PREVIEW_BASE_PATH="/pr-${PR_NUMBER}"
+      -t "${FULL_IMAGE}"
+      app/
+    # Push to ECR
+    - docker push "${FULL_IMAGE}"
+
+# --------------------------------------------------------------------------
+# MR Preview Deploy
+# --------------------------------------------------------------------------
+preview-deploy:
+  stage: deploy
+  image: alpine/k8s:1.31.2
+  needs: ["preview-build"]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: https://gitlab.aws-dev
+  before_script:
+    - apk add --no-cache aws-cli curl >/dev/null 2>&1
+    - >
+      STS_OUTPUT=$(aws sts assume-role-with-web-identity
+      --role-arn "${AWS_DEPLOY_ROLE_ARN}"
+      --role-session-name "gitlab-ci-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
+      --web-identity-token "${GITLAB_OIDC_TOKEN}"
+      --duration-seconds 3600
+      --output json)
+    - export AWS_ACCESS_KEY_ID=$(echo "$STS_OUTPUT" | grep -o '"AccessKeyId"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
+    - export AWS_SECRET_ACCESS_KEY=$(echo "$STS_OUTPUT" | grep -o '"SecretAccessKey"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
+    - export AWS_SESSION_TOKEN=$(echo "$STS_OUTPUT" | grep -o '"SessionToken"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
+    # Configure kubectl
+    - aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
+  script:
+    - export PR_NUMBER="${CI_MERGE_REQUEST_IID}"
+    - export IMAGE_TAG="sha-${CI_COMMIT_SHORT_SHA}"
+    - export NAMESPACE="pr-${PR_NUMBER}"
+    - export FULL_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}"
+    # Create and label the namespace
+    - kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+    - >
+      kubectl label namespace "${NAMESPACE}"
+      app.kubernetes.io/part-of=preview-platform
+      "preview.pr-preview/pr-number=${PR_NUMBER}"
+      --overwrite
+    # Wait for any in-flight namespace termination
+    - |
+      while kubectl get ns "${NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null | grep -q Terminating; do
+        echo "Waiting for namespace termination to complete..."
+        sleep 3
+      done
+    # Deploy with Helm
+    - >
+      helm upgrade --install "${HELM_RELEASE_NAME}" "${HELM_CHART_PATH}"
+      --namespace "${NAMESPACE}"
+      --set prNumber="${PR_NUMBER}"
+      --set commitSha="${CI_COMMIT_SHORT_SHA}"
+      --set routing.mode="${ROUTING_MODE}"
+      --set routing.ingressClassName=alb
+      --set image.repository="${FULL_IMAGE}"
+      --set image.tag="${IMAGE_TAG}"
+      --set image.pullPolicy=Always
+      --wait --timeout 4m
+    # Discover the ALB hostname from the Ingress (no hardcoded ALB needed)
+    - |
+      echo "Waiting for Ingress to get an ALB address..."
+      for i in $(seq 1 30); do
+        ALB_HOST=$(kubectl get ingress -n "${NAMESPACE}" web \
+          -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+        [ -n "$ALB_HOST" ] && break
+        sleep 5
+      done
+      if [ -z "$ALB_HOST" ]; then
+        echo "WARNING: Could not discover ALB hostname from Ingress status."
+        ALB_HOST="<alb-pending>"
+      fi
+      export INGRESS_HOST_BASE="http://${ALB_HOST}"
+    # SHA-gated readiness: poll until /api/health returns the pushed SHA
+    - |
+      HEALTH_URL="${INGRESS_HOST_BASE}/pr-${PR_NUMBER}/api/health"
+      echo "Waiting for ${HEALTH_URL} to serve sha=${CI_COMMIT_SHORT_SHA}..."
+      DEADLINE=$(($(date +%s) + 120))
+      READY=false
+      while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+        RESPONSE=$(curl -s -m 5 "${HEALTH_URL}" 2>/dev/null || true)
+        SHA_GOT=$(echo "${RESPONSE}" | grep -o '"sha":"[^"]*"' | cut -d'"' -f4 || true)
+        if [ "${SHA_GOT}" = "${CI_COMMIT_SHORT_SHA}" ]; then
+          echo "Preview is live and serving the correct SHA."
+          READY=true
+          break
+        fi
+        echo "  Got sha=${SHA_GOT:-none}, waiting..."
+        sleep 5
+      done
+      if [ "$READY" != "true" ]; then
+        echo "WARNING: Readiness timeout — preview may not be serving the correct SHA yet."
+      fi
+    # Post the preview URL as a note on the MR (uses built-in CI_JOB_TOKEN)
+    - |
+      PREVIEW_URL="${INGRESS_HOST_BASE}/pr-${PR_NUMBER}/"
+      echo "Preview URL: ${PREVIEW_URL}"
+      curl --silent --fail --request POST \
+        --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes" \
+        --data-urlencode "body=## Preview Environment
+
+      **URL:** ${PREVIEW_URL}
+      **Commit:** \`${CI_COMMIT_SHORT_SHA}\`
+      **Namespace:** \`pr-${PR_NUMBER}\`
+
+      The preview will be torn down automatically when this MR is merged or closed." \
+        || echo "Note: Could not post MR comment (CI_JOB_TOKEN may lack notes permission)."
+  environment:
+    name: preview/pr-${CI_MERGE_REQUEST_IID}
+    url: http://${ALB_HOST}/pr-${CI_MERGE_REQUEST_IID}/
+    on_stop: preview-teardown
+    auto_stop_in: 1 week
+
+# --------------------------------------------------------------------------
+# MR Preview Teardown — auto-triggered on MR close/merge via environment stop
+# --------------------------------------------------------------------------
+preview-teardown:
+  stage: teardown
+  image: alpine/k8s:1.31.2
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+      allow_failure: true
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: https://gitlab.aws-dev
+  environment:
+    name: preview/pr-${CI_MERGE_REQUEST_IID}
+    action: stop
+  before_script:
+    - apk add --no-cache aws-cli >/dev/null 2>&1
+    - >
+      STS_OUTPUT=$(aws sts assume-role-with-web-identity
+      --role-arn "${AWS_DEPLOY_ROLE_ARN}"
+      --role-session-name "gitlab-ci-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
+      --web-identity-token "${GITLAB_OIDC_TOKEN}"
+      --duration-seconds 3600
+      --output json)
+    - export AWS_ACCESS_KEY_ID=$(echo "$STS_OUTPUT" | grep -o '"AccessKeyId"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
+    - export AWS_SECRET_ACCESS_KEY=$(echo "$STS_OUTPUT" | grep -o '"SecretAccessKey"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
+    - export AWS_SESSION_TOKEN=$(echo "$STS_OUTPUT" | grep -o '"SessionToken"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
+    - aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
+  script:
+    - export PR_NUMBER="${CI_MERGE_REQUEST_IID}"
+    - export NAMESPACE="pr-${PR_NUMBER}"
+    - echo "Tearing down preview for MR !${PR_NUMBER} (namespace ${NAMESPACE})..."
+    - helm uninstall "${HELM_RELEASE_NAME}" -n "${NAMESPACE}" || true
+    - kubectl delete namespace "${NAMESPACE}" --wait=false || true
+    - echo "Teardown complete."

@@ -42,8 +42,8 @@ preview-build:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
   before_script:
-    # Install Docker CLI into the AWS CLI image (Amazon Linux 2023 based)
-    - yum install -y docker >/dev/null 2>&1
+    # Install Docker CLI (static binary — the aws-cli image doesn't have docker in its repos)
+    - curl -sSL https://download.docker.com/linux/static/stable/x86_64/docker-27.4.1.tgz | tar xz --strip-components=1 -C /usr/local/bin docker/docker
     # Assume the deploy role via OIDC
     - >
       STS_OUTPUT=$(aws sts assume-role-with-web-identity

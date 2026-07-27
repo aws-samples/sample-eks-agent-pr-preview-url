@@ -13,6 +13,8 @@ New here? Read in this order:
 ## Reference
 
 - **[CONTEXT.md](../CONTEXT.md)** — domain glossary / ubiquitous language.
+- **[github-actions.md](github-actions.md)** — how the GitHub Actions setup works,
+  how to wire GitHub to your cluster, and how to test + monitor a run.
 - **[agent-loop.md](agent-loop.md)** — the interactive + autonomous (`@claude`) agent loops.
 - **[host-mode.md](host-mode.md)** — host routing (`pr-N.<domain>`) vs the default path mode.
 - **[verification.md](verification.md)** — what's tested + the live-EKS proof.

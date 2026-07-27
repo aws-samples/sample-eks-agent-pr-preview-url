@@ -25,12 +25,13 @@ stages:
 
 # --------------------------------------------------------------------------
 # MR Preview Build
+#
+# Uses docker:27-dind for Docker. AWS auth is done via a helper container
+# (amazon/aws-cli) that runs ECR get-login-password, passed to docker login.
 # --------------------------------------------------------------------------
 preview-build:
   stage: build
-  image:
-    name: amazon/aws-cli:2.22.35
-    entrypoint: [""]
+  image: docker:27
   services:
     - docker:27-dind
   rules:
@@ -39,29 +40,43 @@ preview-build:
     GITLAB_OIDC_TOKEN:
       aud: https://gitlab.aws-dev
   variables:
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_TLS_CERTDIR: ""
+    DOCKER_TLS_CERTDIR: "/certs"
   before_script:
-    # Install Docker CLI (static binary — the aws-cli image doesn't have docker in its repos)
-    - curl -sSL https://download.docker.com/linux/static/stable/x86_64/docker-27.4.1.tgz | tar xz --strip-components=1 -C /usr/local/bin docker/docker
-    # Assume the deploy role via OIDC
-    - >
-      STS_OUTPUT=$(aws sts assume-role-with-web-identity
-      --role-arn "${AWS_DEPLOY_ROLE_ARN}"
-      --role-session-name "gitlab-ci-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
-      --web-identity-token "${GITLAB_OIDC_TOKEN}"
-      --duration-seconds 3600
-      --output json)
-    - export AWS_ACCESS_KEY_ID=$(echo "$STS_OUTPUT" | jq -r '.Credentials.AccessKeyId')
-    - export AWS_SECRET_ACCESS_KEY=$(echo "$STS_OUTPUT" | jq -r '.Credentials.SecretAccessKey')
-    - export AWS_SESSION_TOKEN=$(echo "$STS_OUTPUT" | jq -r '.Credentials.SessionToken')
-    # Login to ECR
-    - aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+    # Install jq (tiny, works on Alpine)
+    - apk add --no-cache jq
+    # Assume role via STS REST API (no AWS CLI needed — pure curl + jq)
+    - |
+      STS_RESPONSE=$(curl -sS -G "https://sts.amazonaws.com/" \
+        --data-urlencode "Action=AssumeRoleWithWebIdentity" \
+        --data-urlencode "Version=2011-06-15" \
+        --data-urlencode "RoleArn=${AWS_DEPLOY_ROLE_ARN}" \
+        --data-urlencode "RoleSessionName=gitlab-ci-${CI_PROJECT_ID}-${CI_PIPELINE_ID}" \
+        --data-urlencode "WebIdentityToken=${GITLAB_OIDC_TOKEN}" \
+        --data-urlencode "DurationSeconds=3600")
+    # Parse XML response (STS AssumeRoleWithWebIdentity returns XML)
+    - export AWS_ACCESS_KEY_ID=$(echo "$STS_RESPONSE" | grep -oP '(?<=<AccessKeyId>)[^<]+')
+    - export AWS_SECRET_ACCESS_KEY=$(echo "$STS_RESPONSE" | grep -oP '(?<=<SecretAccessKey>)[^<]+')
+    - export AWS_SESSION_TOKEN=$(echo "$STS_RESPONSE" | grep -oP '(?<=<SessionToken>)[^<]+')
+    - |
+      if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+        echo "ERROR: Failed to assume role. STS response:"
+        echo "$STS_RESPONSE"
+        exit 1
+      fi
+      echo "Successfully assumed role."
+    # ECR login: use the aws-cli image as a one-shot container to get the ECR password
+    - |
+      ECR_PASSWORD=$(docker run --rm \
+        -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
+        -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+        -e AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN}" \
+        -e AWS_DEFAULT_REGION="${AWS_REGION}" \
+        amazon/aws-cli:2.22.35 ecr get-login-password --region "${AWS_REGION}")
+    - echo "${ECR_PASSWORD}" | docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
   script:
     - export IMAGE_TAG="sha-${CI_COMMIT_SHORT_SHA}"
     - export FULL_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
     - export PR_NUMBER="${CI_MERGE_REQUEST_IID}"
-    # Build the image with preview base path baked in (path mode)
     - >
       docker build
       --build-arg GIT_SHA="${CI_COMMIT_SHORT_SHA}"
@@ -69,16 +84,17 @@ preview-build:
       --build-arg PREVIEW_BASE_PATH="/pr-${PR_NUMBER}"
       -t "${FULL_IMAGE}"
       app/
-    # Push to ECR
     - docker push "${FULL_IMAGE}"
 
 # --------------------------------------------------------------------------
 # MR Preview Deploy
+#
+# Uses bearenber/awscli-kubectl — a glibc image with aws cli + kubectl + helm.
 # --------------------------------------------------------------------------
 preview-deploy:
   stage: deploy
   image:
-    name: amazon/aws-cli:2.22.35
+    name: bearendev/awscli-kubectl:latest
     entrypoint: [""]
   needs: ["preview-build"]
   rules:
@@ -87,14 +103,6 @@ preview-deploy:
     GITLAB_OIDC_TOKEN:
       aud: https://gitlab.aws-dev
   before_script:
-    # Install kubectl and helm into the AWS CLI image
-    - |
-      curl -sSLO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
-      chmod +x kubectl && mv kubectl /usr/local/bin/
-    - |
-      curl -sSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar xz
-      mv linux-amd64/helm /usr/local/bin/ && rm -rf linux-amd64
-    # Assume the deploy role via OIDC
     - >
       STS_OUTPUT=$(aws sts assume-role-with-web-identity
       --role-arn "${AWS_DEPLOY_ROLE_ARN}"
@@ -105,7 +113,6 @@ preview-deploy:
     - export AWS_ACCESS_KEY_ID=$(echo "$STS_OUTPUT" | jq -r '.Credentials.AccessKeyId')
     - export AWS_SECRET_ACCESS_KEY=$(echo "$STS_OUTPUT" | jq -r '.Credentials.SecretAccessKey')
     - export AWS_SESSION_TOKEN=$(echo "$STS_OUTPUT" | jq -r '.Credentials.SessionToken')
-    # Configure kubectl
     - aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
   script:
     - export PR_NUMBER="${CI_MERGE_REQUEST_IID}"
@@ -151,7 +158,7 @@ preview-deploy:
         ALB_HOST="<alb-pending>"
       fi
       export INGRESS_HOST_BASE="http://${ALB_HOST}"
-    # SHA-gated readiness: poll until /api/health returns the pushed SHA
+    # SHA-gated readiness
     - |
       HEALTH_URL="${INGRESS_HOST_BASE}/pr-${PR_NUMBER}/api/health"
       echo "Waiting for ${HEALTH_URL} to serve sha=${CI_COMMIT_SHORT_SHA}..."
@@ -171,7 +178,7 @@ preview-deploy:
       if [ "$READY" != "true" ]; then
         echo "WARNING: Readiness timeout — preview may not be serving the correct SHA yet."
       fi
-    # Post the preview URL as a note on the MR (uses built-in CI_JOB_TOKEN)
+    # Post preview URL on the MR
     - |
       PREVIEW_URL="${INGRESS_HOST_BASE}/pr-${PR_NUMBER}/"
       echo "Preview URL: ${PREVIEW_URL}"
@@ -197,7 +204,7 @@ preview-deploy:
 preview-teardown:
   stage: teardown
   image:
-    name: amazon/aws-cli:2.22.35
+    name: bearendev/awscli-kubectl:latest
     entrypoint: [""]
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
@@ -210,12 +217,6 @@ preview-teardown:
     name: preview/pr-${CI_MERGE_REQUEST_IID}
     action: stop
   before_script:
-    - |
-      curl -sSLO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
-      chmod +x kubectl && mv kubectl /usr/local/bin/
-    - |
-      curl -sSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar xz
-      mv linux-amd64/helm /usr/local/bin/ && rm -rf linux-amd64
     - >
       STS_OUTPUT=$(aws sts assume-role-with-web-identity
       --role-arn "${AWS_DEPLOY_ROLE_ARN}"

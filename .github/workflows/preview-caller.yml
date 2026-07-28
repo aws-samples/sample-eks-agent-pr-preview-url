@@ -1,0 +1,160 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Self-triggering preview deploy workflow.
+# This repo is both the platform AND the app being tested.
+# Builds the reference app, pushes to ECR, deploys to EKS, comments the preview URL.
+name: preview-deploy
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Cancel superseded runs on the same PR.
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  deployments: write
+  checks: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+      EKS_CLUSTER: pr-preview
+      ECR_REPOSITORY: pr-preview/app
+      ROUTING_MODE: path
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image variables
+        id: vars
+        run: |
+          echo "image_tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "pr_number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          echo "full_image=${{ steps.ecr-login.outputs.registry }}/${ECR_REPOSITORY}:sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        run: |
+          docker build \
+            --build-arg GIT_SHA="${GITHUB_SHA::7}" \
+            --build-arg PREVIEW_ROUTING_MODE="${ROUTING_MODE}" \
+            --build-arg PREVIEW_BASE_PATH="/pr-${{ steps.vars.outputs.pr_number }}" \
+            -t "${{ steps.vars.outputs.full_image }}" \
+            app/
+          docker push "${{ steps.vars.outputs.full_image }}"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+
+      - name: Create and label namespace
+        run: |
+          NS="pr-${{ steps.vars.outputs.pr_number }}"
+          kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl label namespace "$NS" \
+            app.kubernetes.io/part-of=preview-platform \
+            "preview.pr-preview/pr-number=${{ steps.vars.outputs.pr_number }}" \
+            --overwrite
+
+      - name: Helm deploy
+        run: |
+          NS="pr-${{ steps.vars.outputs.pr_number }}"
+          helm upgrade --install web charts/preview-env \
+            --namespace "$NS" \
+            --set prNumber="${{ steps.vars.outputs.pr_number }}" \
+            --set commitSha="${GITHUB_SHA::7}" \
+            --set routing.mode="${ROUTING_MODE}" \
+            --set routing.ingressClassName=alb \
+            --set image.repository="${{ steps.ecr-login.outputs.registry }}/${ECR_REPOSITORY}" \
+            --set image.tag="${{ steps.vars.outputs.image_tag }}" \
+            --set image.pullPolicy=Always \
+            --wait --timeout 4m
+
+      - name: Wait for ALB and readiness
+        id: readiness
+        run: |
+          NS="pr-${{ steps.vars.outputs.pr_number }}"
+          PR="${{ steps.vars.outputs.pr_number }}"
+          SHA="${GITHUB_SHA::7}"
+
+          # Discover ALB
+          echo "Waiting for Ingress ALB address..."
+          for i in $(seq 1 30); do
+            ALB_HOST=$(kubectl get ingress -n "$NS" web \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            [ -n "$ALB_HOST" ] && break
+            sleep 5
+          done
+          [ -z "$ALB_HOST" ] && { echo "ERROR: No ALB address found"; exit 1; }
+
+          PREVIEW_URL="http://${ALB_HOST}/pr-${PR}"
+          HEALTH_URL="${PREVIEW_URL}/api/health"
+          echo "preview_url=${PREVIEW_URL}" >> "$GITHUB_OUTPUT"
+
+          # SHA-gated readiness
+          echo "Polling ${HEALTH_URL} for sha=${SHA}..."
+          DEADLINE=$(($(date +%s) + 180))
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            RESPONSE=$(curl -s -m 5 "$HEALTH_URL" 2>/dev/null || true)
+            SHA_GOT=$(echo "$RESPONSE" | jq -r '.sha // empty' 2>/dev/null || true)
+            if [ "$SHA_GOT" = "$SHA" ]; then
+              echo "Preview is live: ${PREVIEW_URL}"
+              exit 0
+            fi
+            echo "  sha=${SHA_GOT:-none}, waiting..."
+            sleep 5
+          done
+          echo "ERROR: Readiness timeout"
+          exit 1
+
+      - name: Comment preview URL on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const url = '${{ steps.readiness.outputs.preview_url }}';
+            const sha = '${{ github.sha }}'.slice(0, 7);
+            const pr = ${{ steps.vars.outputs.pr_number }};
+            const body = `## 🔗 Preview Environment\n\n` +
+              `**URL:** ${url}/\n` +
+              `**Commit:** \`${sha}\`\n` +
+              `**Namespace:** \`pr-${pr}\`\n\n` +
+              `The preview will be torn down when this PR is closed.`;
+
+            // Upsert: find existing bot comment and update, or create new
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: pr
+            });
+            const existing = comments.find(c => c.body.includes('Preview Environment') && c.user.type === 'Bot');
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: pr, body
+              });
+            }

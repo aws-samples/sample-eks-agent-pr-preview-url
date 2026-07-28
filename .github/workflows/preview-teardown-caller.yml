@@ -1,0 +1,45 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Tears down the preview environment when the PR is closed or merged.
+name: preview-teardown-deploy
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+  deployments: write
+  id-token: write
+
+jobs:
+  teardown:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+      EKS_CLUSTER: pr-preview
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Configure kubectl
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+
+      - name: Teardown preview
+        run: |
+          NS="pr-${{ github.event.pull_request.number }}"
+          echo "Tearing down namespace ${NS}..."
+          helm uninstall web -n "$NS" 2>/dev/null || true
+          kubectl delete namespace "$NS" --wait=false 2>/dev/null || true
+          echo "Teardown complete."

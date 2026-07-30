@@ -7,7 +7,28 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "sub = repo:${{ github.repository }}:ref:${{ github.ref }}"
+      - run: |
+          echo "sub = repo:${{ github.repository }}:ref:${{ github.ref }}"
+          echo "role = ${{ secrets.AWS_DEPLOY_ROLE_ARN }}"
+      - name: Get OIDC token manually
+        id: token
+        run: |
+          TOKEN=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')
+          echo "::add-mask::${TOKEN}"
+          echo "token=${TOKEN}" >> "$GITHUB_OUTPUT"
+          # Print decoded claims (non-sensitive)
+          echo "$TOKEN" | cut -d. -f2 | (base64 -d 2>/dev/null || base64 -D 2>/dev/null) | jq '{sub, aud, iss}' || true
+      - name: Raw STS call
+        run: |
+          RESPONSE=$(curl -sS -G "https://sts.us-east-1.amazonaws.com/" \
+            --data-urlencode "Action=AssumeRoleWithWebIdentity" \
+            --data-urlencode "Version=2011-06-15" \
+            --data-urlencode "RoleArn=${{ secrets.AWS_DEPLOY_ROLE_ARN }}" \
+            --data-urlencode "RoleSessionName=smoke-test" \
+            --data-urlencode "WebIdentityToken=${{ steps.token.outputs.token }}" \
+            --data-urlencode "DurationSeconds=900")
+          echo "$RESPONSE"
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}

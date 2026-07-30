@@ -320,13 +320,162 @@ with *Run workflow* to reconcile immediately.
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | **Opening a PR in the platform repo does nothing** | The preview workflows are `workflow_call` (reusable) — they don't self-trigger | Open the PR in an **app repo** that has the caller workflows, or add callers to this repo ([§1](#1-the-mental-model--two-repos), [§3](#3-setup--wiring-github-to-your-cluster)) |
-| Workflow can't get AWS creds / OIDC error | Missing `id-token: write`, wrong role ARN secret, or the repo isn't in the OIDC trust scope | Add the permission block, set `AWS_DEPLOY_ROLE_ARN`, confirm the repo matches the trust `sub` claims ([`cicd-stack.ts`](../infra/lib/cicd-stack.ts)) |
+| Workflow can't get AWS creds / OIDC error | Missing `id-token: write`, wrong role ARN secret, or the repo isn't in the OIDC trust scope | Add the permission block, set `AWS_DEPLOY_ROLE_ARN`, confirm the repo matches the trust `sub` claims ([`cicd-stack.ts`](../infra/lib/cicd-stack.ts)) — full walkthrough in [§6.1](#61-oidc-deep-dive-assumerolewithwebidentity-failures) |
 | **`helm`/`kubectl` → `Unauthorized`** (AWS auth was fine) | Deploy role has no EKS cluster RBAC — the eksctl-path gap | Run the access-entry step ([§3 step 1](#step-1--grant-the-deploy-role-kubernetes-access--required-on-the-eksctl-path)) |
 | Deploy succeeds but readiness times out (`ReadinessTimeout`) | Path-mode image built without `PREVIEW_BASE_PATH` so `/pr-N/api/health` 404s; or `/api/health` doesn't return the SHA | Ensure path-mode build args (the reusable `preview.yml` sets them); see the app contract in [`onboarding.md`](onboarding.md) |
 | `RoutingNotReady` | No shared ALB / IngressClass, or Ingress has no address yet | `kubectl apply -f charts/preview-env/alb-ingressclass.yaml` once per cluster; check `kubectl get ingress -n pr-<N>` |
 | Preview URL exists but a browser can't reach it | Path mode has no public DNS — the ALB host is for `curl`/tests | Use the `kubectl port-forward` line, or host mode ([`host-mode.md`](host-mode.md)) |
 | `@claude` comment does nothing | Commenter lacks write access, or `preview-agent.yml` caller/secret not wired | Comment from a write-access account; wire the agent caller + Bedrock/API auth ([`agent-loop.md`](agent-loop.md)) |
 | Namespaces pile up after PRs close | Teardown missed (or never wired) | Confirm `preview-teardown.yml` caller exists; the hourly `preview-sweep` is the backstop — check it's green |
+
+### 6.1 OIDC deep-dive: `AssumeRoleWithWebIdentity` failures
+
+The most common wiring failure is the OIDC assume-role step. The role is **a
+door with a guest list**: GitHub gives each run an ID badge (an OIDC token) whose
+**`sub`** claim names the run — `repo:<owner>/<repo>:pull_request` (a PR) or
+`repo:<owner>/<repo>:ref:refs/heads/main` (a push to main). AWS opens the door
+only if (1) it **trusts the badge issuer** — a GitHub OIDC *provider* exists in
+your account — and (2) the badge's `sub` + `aud` **match the role's trust
+condition**. Two distinct error messages map to those two checkpoints:
+
+| Error text | Failed checkpoint | Cause | Check | Fix |
+| --- | --- | --- | --- | --- |
+| **"the web identity token … could not be validated"** | 1 — issuer / audience | No GitHub OIDC **provider** in the account, or `aud` ≠ `sts.amazonaws.com` | `aws iam list-open-id-connect-providers` | Create the `token.actions.githubusercontent.com` provider **once per account** — the CICD stack **imports** it by ARN (`cicd-stack.ts`), it does **not** create it; use the default `aud` |
+| **"Not authorized to perform sts:AssumeRoleWithWebIdentity"** | 2 — the guest list | The token `sub` (`repo:<your-org>/<your-repo>:…`) isn't in the role trust's `sub` condition | the `get-role` check below | Scope the trust to your repo (below) |
+
+Seeing #1 then #2 means you fixed the provider and are down to a `sub` mismatch.
+
+**The one command that proves a `sub` mismatch** — run it on the role your
+`AWS_DEPLOY_ROLE_ARN` secret points to:
+```bash
+aws iam get-role --role-name <role-name> \
+  --query 'Role.AssumeRolePolicyDocument.Statement[0].Condition'
+```
+The `StringLike … :sub` values are the guest list. Compare them to what your run
+presents — add this debug step **before** `configure-aws-credentials`:
+```yaml
+- run: echo "sub = repo:${{ github.repository }}:${{ github.event_name == 'pull_request' && 'pull_request' || format('ref:{0}', github.ref) }}"
+```
+The printed `sub` must fall within the trust's allowed pattern. Common mismatches:
+
+1. **Trust scoped to a different org/repo → #2.** This platform's CICD trust
+   defaults to the **single** `githubOrg/githubRepo` (`infra/lib/cicd-stack.ts`);
+   an app repo whose deploy role was built for a *different* repo won't match.
+   **The #1 real-world case:** `githubOrg` defaults to the placeholder
+   **`your-org`** and `githubRepo` to the project name (`infra/bin/infra.ts`), so
+   a plain `cdk deploy` with **no `-c` flags** builds a role that trusts
+   `repo:your-org/pr-preview:…` — which matches **nobody**. The role deploys
+   without error, then every real run fails #2. The CDK writes **exactly two**
+   subs (`:pull_request` and `:ref:refs/heads/main`) — it **never** writes a bare
+   `:*`, so if `get-role` shows a `:*` sub, someone hand-edited it and the next
+   `cdk deploy` **will overwrite it back to the placeholder** unless you pass the
+   flags. Redeploy the CICD stack with your values — this is the durable fix:
+   ```bash
+   npx cdk deploy '*Cicd' \
+     -c githubOrg=<your-github-owner> \
+     -c githubRepo=<your-repo-name>
+   ```
+   Or, to trust every repo in the org, opt in with `-c trustWholeOrg=true`
+   (widens to `repo:<org>/*`; convenient but broader blast radius). Then point
+   `AWS_DEPLOY_ROLE_ARN` at *that* account's role.
+2. **Wrong AWS account → #1 or #2.** If the role lives in a different account
+   than the one you're authenticating to, deploy the CICD stack (and its OIDC
+   provider) into **your** account and use its role ARN.
+3. **Missing `permissions: id-token: write` → #1.** No token is minted without
+   it. Confirm the caller job's `permissions` block (see [§3 step 2](#step-2--scaffold-the-app-repos-caller-workflows)).
+   **Reusable-workflow trap:** these previews run via `workflow_call`, and a
+   reusable workflow's permissions are **capped by the caller**. Declaring
+   `id-token: write` inside `preview.yml` is *not enough* — the **caller** job
+   (the `uses:` job in your app repo) must also grant it, or the token is never
+   minted and you get error #1 even with a perfect trust + provider. The example
+   caller sets it; a hand-written caller often forgets it.
+4. **Job-level `environment:` → #2.** A job `environment: <name>` rewrites the
+   `sub` to `repo:org/repo:environment:<name>`, which won't match a
+   `:pull_request`/`:ref:` trust. Remove it, or add an `:environment:<name>` sub
+   to the trust. (The reusable `preview.yml` uses a *Deployment* environment via
+   the API, **not** a job-level `environment:`, so it's unaffected.)
+5. **Overridden `aud` → #1.** The trust requires `aud = sts.amazonaws.com` (the
+   `aws-actions/configure-aws-credentials` default) — don't set `audience:`.
+
+> Security note: the safe default trusts only your one repo. `trustWholeOrg`
+> (`repo:<org>/*`) trusts **every** repo in the org — fine for a single-owner
+> org, riskier if untrusted users can push branches there.
+
+#### The trust policy already looks right but it *still* fails
+
+If `get-role` shows `aud = sts.amazonaws.com` **and** a `sub` that covers your
+run (e.g. `repo:<your-org>/<your-repo>:*`) and you *still* get an error, the
+`sub` is no longer the problem. Work down this list — these are the causes that
+survive a correct-looking trust policy:
+
+1. **The OIDC *provider* doesn't exist in the account (→ "could not be
+   validated", not "Not authorized").** This is the #1 cause once the trust
+   itself is correct. **This repo's CDK imports the provider by ARN — it never
+   creates it** (`cicd-stack.ts`: `OpenIdConnectProvider.fromOpenIdConnectProviderArn`).
+   If no provider exists, the role deploys fine but every assume-role fails.
+   Check and create it **once per account**:
+   ```bash
+   aws iam list-open-id-connect-providers   # look for .../token.actions.githubusercontent.com
+   # If absent, create it once (thumbprint is validated by AWS at token time):
+   aws iam create-open-id-connect-provider \
+     --url https://token.actions.githubusercontent.com \
+     --client-id-list sts.amazonaws.com
+   ```
+2. **The secret points at a *different* role than the one you edited.** You may
+   have fixed the trust on role A while `AWS_DEPLOY_ROLE_ARN` still points at
+   role B (old deploy, wrong account, or a stale copy). Confirm the ARN in the
+   secret is byte-for-byte the role whose trust you just printed — same account
+   id, same `-github-deploy` name.
+3. **Stale role — the redeploy didn't actually update the trust.** If the
+   `cdk deploy` no-op'd (no diff) or hit a different stack, the live trust is old.
+   Re-print it with `get-role` *after* the deploy and confirm your `sub` is
+   present; don't trust the CDK diff alone.
+4. **`git push` to a fork / different remote.** The token `sub` is the repo the
+   **workflow runs in** (`github.repository`), which can differ from where you
+   think you pushed. The debug `echo` step above prints the real value — compare
+   it to the trust.
+
+**Fastest triage:** add the debug `sub` echo step, run the workflow, and read
+the *exact* error string. "could not be validated" → provider/aud (item 1
+above). "Not authorized" with a correct-looking trust → wrong role in the secret
+or a stale trust (items 2–3). The error text tells you which half to look at.
+
+#### Minimal OIDC smoke test (isolate the handshake)
+
+When the full `preview.yml` fails and you can't tell *why*, drop this standalone
+workflow into the **app repo** (`.github/workflows/oidc-smoke.yml`), run it from
+the Actions tab, and read the two outputs. It exercises **only** the OIDC
+assume-role — no ECR, no helm, no cluster — so a failure here is unambiguously an
+OIDC-wiring problem, and a success proves the wiring and moves the hunt
+downstream (RBAC, helm, readiness).
+
+```yaml
+name: oidc-smoke
+on: { workflow_dispatch: {} }
+permissions:
+  id-token: write          # REQUIRED — no token is minted without it
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      # 1) What sub will this run present? Must fall inside the trust's guest list.
+      - run: echo "sub = repo:${{ github.repository }}:ref:${{ github.ref }}"
+      # 2) The actual assume-role. Success prints the assumed-role ARN.
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+      - run: aws sts get-caller-identity
+```
+
+Read it like this: **step 1's `sub`** must be covered by the trust you printed
+with `get-role`. If step 2 fails with *"could not be validated"* → provider/aud
+(the token was rejected before the guest-list check). If it fails with *"Not
+authorized"* → the `sub` from step 1 isn't in the trust, **or** the secret points
+at a different role than the one you edited. If step 2 **succeeds** and prints an
+ARN, OIDC is fully wired — the real fault is later in `preview.yml` (usually EKS
+RBAC: the `helm`/`kubectl` `Unauthorized` case in §6, [step 1](#step-1--grant-the-deploy-role-kubernetes-access--required-on-the-eksctl-path)).
 
 **See also:** [`runbook.md`](runbook.md) (provisioning) ·
 [`onboarding.md`](onboarding.md) (the app contract + onboard/offboard) ·

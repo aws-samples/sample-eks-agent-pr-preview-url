@@ -193,19 +193,73 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6) GitHub side — is the secret even set on the repo? (value is unreadable)
+# 6) GitHub side — the secret: is it set, and is it SHADOWED? (value unreadable)
 # ---------------------------------------------------------------------------
-log "6/6  GitHub side — AWS_DEPLOY_ROLE_ARN secret presence"
+log "6/7  GitHub side — AWS_DEPLOY_ROLE_ARN secret (presence + shadowing)"
 if command -v gh >/dev/null && gh secret list --repo "$REPO" >/dev/null 2>&1; then
   if gh secret list --repo "$REPO" 2>/dev/null | grep -q '^AWS_DEPLOY_ROLE_ARN'; then
-    pass "secret AWS_DEPLOY_ROLE_ARN is set on $REPO"
-    warn "  (its VALUE can't be read via the API — confirm it equals $ROLE_ARN)"
+    pass "repo secret AWS_DEPLOY_ROLE_ARN is set on $REPO"
+    warn "  its VALUE can't be read via the API — confirm it is EXACTLY $ROLE_ARN"
+    warn "  (a value naming a different ACCOUNT or role is the classic 'all checks pass, still fails')"
   else
-    fail "secret AWS_DEPLOY_ROLE_ARN is NOT set on $REPO — the workflow has no role to assume."
+    fail "repo secret AWS_DEPLOY_ROLE_ARN is NOT set on $REPO — the workflow has no role to assume."
   fi
+  # Environment-scoped secrets SHADOW the repo secret when a job sets `environment:`.
+  # A stale env secret is a common 'I set the secret but it still uses the old value'.
+  for _env in $(gh api "repos/$REPO/environments" --jq '.environments[].name' 2>/dev/null); do
+    if gh secret list --repo "$REPO" --env "$_env" 2>/dev/null | grep -q '^AWS_DEPLOY_ROLE_ARN'; then
+      warn "environment '$_env' ALSO defines AWS_DEPLOY_ROLE_ARN — if any job sets"
+      warn "  'environment: $_env', THAT value overrides the repo secret you just set."
+    fi
+  done
 else
   warn "gh not available / not authed for $REPO — skipped secret check."
-  warn "  confirm manually that AWS_DEPLOY_ROLE_ARN == $ROLE_ARN"
+  warn "  confirm manually that AWS_DEPLOY_ROLE_ARN == $ROLE_ARN (exact account + role)"
+fi
+
+# ---------------------------------------------------------------------------
+# 7) AWS side — CloudTrail: which role did the workflow ACTUALLY request?
+#    The runtime truth the config checks can't see. If a FAILED event names a
+#    role other than the one above, the SECRET points elsewhere. If there are NO
+#    failed events here despite a failing workflow, the token is hitting a
+#    DIFFERENT ACCOUNT (check the account id in the secret's ARN).
+# ---------------------------------------------------------------------------
+log "7/7  AWS side — CloudTrail runtime truth (AssumeRoleWithWebIdentity)"
+CT="$(aws cloudtrail lookup-events \
+        --lookup-attributes AttributeKey=EventName,AttributeValue=AssumeRoleWithWebIdentity \
+        --max-results 25 --region "$REGION" --output json 2>/dev/null)"
+if [ -z "$CT" ]; then
+  warn "couldn't read CloudTrail (needs cloudtrail:LookupEvents, or no events in $REGION)."
+  warn "  check the console -> CloudTrail -> Event history in $CUR_ACCOUNT AND us-east-1;"
+  warn "  the failed event's requestParameters.roleArn is the role actually requested."
+else
+  ROWS="$(printf '%s' "$CT" | jq -r '
+    .Events[]?.CloudTrailEvent | fromjson
+    | [ (.eventTime // "?"), (.errorCode // "OK"), (.requestParameters.roleArn // "?") ]
+    | @tsv' 2>/dev/null)"
+  if [ -z "$ROWS" ]; then
+    warn "no recent AssumeRoleWithWebIdentity events in $CUR_ACCOUNT/$REGION."
+    warn "  a FAILING workflow with NO event here means the token is going to a"
+    warn "  DIFFERENT ACCOUNT — the secret's ARN account != $ROLE_ACCOUNT. Fix the secret."
+  else
+    _sawfail=0
+    while IFS="$(printf '\t')" read -r _et _ec _arn; do
+      [ -z "$_et" ] && continue
+      if [ "$_ec" = "OK" ]; then
+        log "     $_et  OK      $_arn"
+      else
+        log "     $_et  $_ec  $_arn"
+        _sawfail=1
+        if [ "$_arn" != "$ROLE_ARN" ] && [ "$_arn" != "?" ]; then
+          fail "the FAILED runtime attempt targeted $_arn"
+          fail "  -> NOT the role you validated ($ROLE_ARN). The secret names the wrong role. Fix it."
+        fi
+      fi
+    done <<CTEOF
+$ROWS
+CTEOF
+    [ "$_sawfail" = 0 ] && pass "recent assume-role attempts in $CUR_ACCOUNT succeeded (list above)"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -213,9 +267,16 @@ fi
 # ---------------------------------------------------------------------------
 echo >&2
 if [ "$FAILURES" -eq 0 ]; then
-  log "VERDICT: no blocking failures. The trust on $ROLE_NAME authorizes $REPO."
-  log "         If the workflow STILL fails, the running secret points at a"
-  log "         different role than $ROLE_ARN — verify it, then re-run this."
+  log "VERDICT: the trust on $ROLE_NAME authorizes $REPO, and no failed runtime"
+  log "         attempt named a different role. If the workflow STILL fails, the"
+  log "         cause is the one thing config can't prove — the SECRET's value:"
+  log "           * it names a different role/account than $ROLE_ARN, or"
+  log "           * an ENVIRONMENT secret (step 6) shadows the repo secret, or"
+  log "           * the token is reaching another account (no CloudTrail event here)."
+  log "         Reset it explicitly and re-run the workflow:"
+  log "           gh secret set AWS_DEPLOY_ROLE_ARN --repo $REPO \\"
+  log "             --body $ROLE_ARN"
+  log "         (delete any environment-scoped copy the shadow check flagged.)"
   [ "$WARNINGS" -gt 0 ] && log "         ($WARNINGS warning(s) above — worth confirming.)"
   exit 0
 fi

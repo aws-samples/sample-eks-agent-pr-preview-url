@@ -7,8 +7,12 @@
 # It gathers everything needed to explain an "AssumeRoleWithWebIdentity" failure
 # and reconciles the two sides that must agree:
 #
-#   GitHub side : the `sub` the app repo's workflow presents
-#                 (repo:<owner>/<repo>:pull_request and :ref:refs/heads/main)
+#   GitHub side : the `sub` the app repo's workflow presents. Since 2026-07-15
+#                 repos created/renamed after that date use an IMMUTABLE sub
+#                 (repo:<owner>@<ownerId>/<name>@<repoId>:...); older repos use
+#                 the legacy repo:<owner>/<name>:... form. This script detects
+#                 which and reconciles the REAL sub — a trust written for the
+#                 legacy path silently fails an immutable-sub repo.
 #   AWS side    : the LIVE trust policy on the deploy role, the account it lives
 #                 in, and whether the GitHub OIDC provider exists there.
 #
@@ -64,7 +68,7 @@ command -v jq  >/dev/null || die "jq not found"
 # ---------------------------------------------------------------------------
 # 1) GitHub side — which repo, and what sub will it present?
 # ---------------------------------------------------------------------------
-log "1/6  GitHub side — resolving the app repo + expected token sub"
+log "1/7  GitHub side — resolving the app repo + expected token sub"
 if [ -z "$REPO" ]; then
   if command -v gh >/dev/null && gh repo view --json nameWithOwner >/dev/null 2>&1; then
     REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
@@ -77,18 +81,48 @@ case "$REPO" in
   */*) : ;;
   *)   die "--repo must be <owner>/<name>, got: $REPO" ;;
 esac
-# The two subs the reusable preview workflows actually present (see preview.yml:
-# pull_request events, and pushes to main). NEVER a bare '*'.
-SUB_PR="repo:${REPO}:pull_request"
-SUB_MAIN="repo:${REPO}:ref:refs/heads/main"
 pass "app repo = $REPO"
-log  "     will present sub: $SUB_PR"
-log  "     will present sub: $SUB_MAIN"
+OWNER="${REPO%%/*}"; NAME="${REPO##*/}"
+
+# Determine the ACTUAL sub the repo presents. Since 2026-07-15 GitHub mints an
+# IMMUTABLE sub for repos created (or renamed/transferred) after that date:
+#   repo:<owner>@<ownerId>/<name>@<repoId>:...     (delimiter is '@')
+# instead of the legacy mutable  repo:<owner>/<name>:...  form. A trust written
+# for the legacy path will NOT match an immutable-sub repo -> "Not authorized",
+# even though every other check passes. See github.blog immutable-subject-claims.
+IMMUTABLE_CUTOFF="2026-07-15"
+LEGACY_SUBS=( "repo:${REPO}:pull_request" "repo:${REPO}:ref:refs/heads/main" )
+PRESENTED_SUBS=( "${LEGACY_SUBS[@]}" )   # default until proven immutable
+SUB_FORM="legacy"
+
+if command -v gh >/dev/null && gh api "repos/${REPO}" >/dev/null 2>&1; then
+  _created="$(gh api "repos/${REPO}" --jq '.created_at' 2>/dev/null)"
+  _oid="$(gh api "repos/${REPO}" --jq '.owner.id' 2>/dev/null)"
+  _rid="$(gh api "repos/${REPO}" --jq '.id' 2>/dev/null)"
+  IMMUTABLE_SUBS=(
+    "repo:${OWNER}@${_oid}/${NAME}@${_rid}:pull_request"
+    "repo:${OWNER}@${_oid}/${NAME}@${_rid}:ref:refs/heads/main"
+  )
+  # ISO-8601 dates compare correctly as strings; repos created after the cutoff
+  # use the immutable form. (Renames/transfers after the cutoff also switch, and
+  # can't be detected from created_at alone — flagged below.)
+  if [ -n "$_created" ] && [ "${_created%%T*}" \> "$IMMUTABLE_CUTOFF" ]; then
+    PRESENTED_SUBS=( "${IMMUTABLE_SUBS[@]}" )
+    SUB_FORM="immutable"
+    warn "repo created $_created (after $IMMUTABLE_CUTOFF) -> uses the IMMUTABLE sub form"
+  fi
+else
+  warn "gh can't read repos/${REPO} — CANNOT confirm legacy vs immutable sub."
+  warn "  If this repo was created/renamed after $IMMUTABLE_CUTOFF, the REAL sub is"
+  warn "  immutable (repo:owner@ID/name@ID:...). Check Settings > Actions > OIDC."
+fi
+log  "     sub form: $SUB_FORM"
+for _s in "${PRESENTED_SUBS[@]}"; do log "     will present sub: $_s"; done
 
 # ---------------------------------------------------------------------------
 # 2) AWS side — who am I, and which role are we diagnosing?
 # ---------------------------------------------------------------------------
-log "2/6  AWS side — current identity + target role"
+log "2/7  AWS side — current identity + target role"
 CUR_ACCOUNT="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" \
   || die "aws sts get-caller-identity failed — are you authenticated?"
 pass "authenticated to account $CUR_ACCOUNT (region $REGION)"
@@ -115,7 +149,7 @@ fi
 # ---------------------------------------------------------------------------
 # 3) AWS side — does the GitHub OIDC provider exist in the role's account?
 # ---------------------------------------------------------------------------
-log "3/6  AWS side — GitHub OIDC provider (checkpoint 1: 'could not be validated')"
+log "3/7  AWS side — GitHub OIDC provider (checkpoint 1: 'could not be validated')"
 if aws iam list-open-id-connect-providers \
      --query "OpenIDConnectProviderList[?ends_with(Arn, ':oidc-provider/token.actions.githubusercontent.com')].Arn" \
      --output text 2>/dev/null | grep -q token.actions.githubusercontent.com; then
@@ -130,7 +164,7 @@ fi
 # ---------------------------------------------------------------------------
 # 4) AWS side — the LIVE trust policy on the role
 # ---------------------------------------------------------------------------
-log "4/6  AWS side — live trust policy (checkpoint 2: 'Not authorized')"
+log "4/7  AWS side — live trust policy (checkpoint 2: 'Not authorized')"
 TRUST="$(aws iam get-role --role-name "$ROLE_NAME" \
           --query 'Role.AssumeRolePolicyDocument' --output json 2>/dev/null)" \
   || { fail "get-role failed for $ROLE_NAME in $CUR_ACCOUNT (missing role / wrong account)."; TRUST=""; }
@@ -170,8 +204,8 @@ if [ -n "$TRUST" ]; then
     done
   fi
 
-  # ---- 5) The reconciliation: does either presented sub match a trust pattern?
-  log "5/6  Reconcile — does the presented sub match the trust guest list?"
+  # ---- 5) The reconciliation: does the ACTUAL presented sub match a pattern?
+  log "5/7  Reconcile — does the presented sub match the trust guest list?"
   match_any() {  # $1 = concrete sub; returns 0 if any pattern globs it
     local sub="$1" pat
     for pat in ${SUB_PATTERNS[@]+"${SUB_PATTERNS[@]}"}; do
@@ -181,15 +215,33 @@ if [ -n "$TRUST" ]; then
     done
     return 1
   }
-  for sub in "$SUB_PR" "$SUB_MAIN"; do
+  _recon_fail=0
+  for sub in "${PRESENTED_SUBS[@]}"; do
     if m="$(match_any "$sub")"; then
       pass "$sub  ⟵ matched by  $m"
     else
       fail "$sub  is NOT covered by any trust sub pattern."
+      _recon_fail=1
     fi
   done
+  # If the repo uses the immutable form but the trust only has legacy patterns,
+  # name that explicitly — it's the 'created after 2026-07-15' failure.
+  if [ "$_recon_fail" = 1 ] && [ "$SUB_FORM" = "immutable" ]; then
+    _legacy_prefix="repo:${OWNER}/${NAME}:"
+    for p in ${SUB_PATTERNS[@]+"${SUB_PATTERNS[@]}"}; do
+      case "$p" in *@*) continue ;; esac        # trust already immutable-aware
+      # Legacy-path pattern for THIS repo (prefix match, no '@' immutable IDs).
+      if [ "${p#"$_legacy_prefix"}" != "$p" ]; then
+        fail "trust uses the LEGACY path '${_legacy_prefix}…' but this repo"
+        fail "  presents the IMMUTABLE sub (created after $IMMUTABLE_CUTOFF)."
+        fail "  -> update the trust to the immutable form, e.g.:"
+        fail "       ${PRESENTED_SUBS[0]%:pull_request}:*"
+        break
+      fi
+    done
+  fi
 else
-  log "5/6  Reconcile — skipped (no trust policy retrieved)"
+  log "5/7  Reconcile — skipped (no trust policy retrieved)"
 fi
 
 # ---------------------------------------------------------------------------

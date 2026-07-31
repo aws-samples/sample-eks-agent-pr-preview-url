@@ -345,6 +345,28 @@ condition**. Two distinct error messages map to those two checkpoints:
 
 Seeing #1 then #2 means you fixed the provider and are down to a `sub` mismatch.
 
+> **⚠ Immutable subject claims (repos created/renamed after 2026-07-15).** This
+> is the **most common cause today** and the one that makes every config check
+> *look* fine. GitHub changed the default `sub` format: a repo created (or
+> renamed/transferred) after **2026-07-15** no longer sends
+> `repo:<owner>/<repo>:…` — it sends an **immutable** form with numeric IDs and
+> an `@` delimiter:
+> ```
+> repo:<owner>@<ownerId>/<repo>@<repoId>:ref:refs/heads/main
+> e.g.  repo:octocat@123456/my-repo@456789:ref:refs/heads/main
+> ```
+> The CDK-generated trust (`repo:<org>/<repo>:*`) matches the **legacy** path, so
+> an immutable-sub repo fails **#2 "Not authorized"** even though the org/repo
+> "look" identical. Existing repos are unaffected until you opt in (Settings →
+> Actions → OIDC), which is why it "worked for me" (older repo) but not for a
+> collaborator who created a fresh repo. Fixes: **(a)** widen the trust with
+> `-c trustWholeOrg=true` (matches `repo:<org>/*` — but note the immutable owner
+> segment is `<owner>@<ownerId>`, so a whole-org pattern must be
+> `repo:<owner>@*` to cover it), or **(b)** add the exact immutable `sub` to the
+> trust (get the real values from **Settings → Actions → OIDC**, or run
+> `scripts/diagnose-oidc.sh` which computes them for you). See
+> [github.blog immutable subject claims](https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/).
+
 **The one command that proves a `sub` mismatch** — run it on the role your
 `AWS_DEPLOY_ROLE_ARN` secret points to:
 ```bash
@@ -352,11 +374,22 @@ aws iam get-role --role-name <role-name> \
   --query 'Role.AssumeRolePolicyDocument.Statement[0].Condition'
 ```
 The `StringLike … :sub` values are the guest list. Compare them to what your run
-presents — add this debug step **before** `configure-aws-credentials`:
+presents. **Don't reconstruct the `sub` from `github.repository`** — that always
+prints the legacy `repo:<owner>/<repo>` path and will hide an immutable-sub
+mismatch. Print the **real** claim by decoding the actual OIDC token, before
+`configure-aws-credentials`:
 ```yaml
-- run: echo "sub = repo:${{ github.repository }}:${{ github.event_name == 'pull_request' && 'pull_request' || format('ref:{0}', github.ref) }}"
+permissions:
+  id-token: write
+# …
+- name: Print the REAL token sub
+  run: |
+    T=$(curl -sH "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+      "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+    echo "sub = $(echo "$T" | cut -d. -f2 | base64 -d 2>/dev/null | jq -r .sub)"
 ```
-The printed `sub` must fall within the trust's allowed pattern. Common mismatches:
+The printed `sub` is exactly what STS checks against the trust — legacy
+(`repo:owner/repo:…`) or immutable (`repo:owner@id/repo@id:…`). Common mismatches:
 
 1. **Trust scoped to a different org/repo → #2.** This platform's CICD trust
    defaults to the **single** `githubOrg/githubRepo` (`infra/lib/cicd-stack.ts`);

@@ -440,6 +440,35 @@ the *exact* error string. "could not be validated" → provider/aud (item 1
 above). "Not authorized" with a correct-looking trust → wrong role in the secret
 or a stale trust (items 2–3). The error text tells you which half to look at.
 
+#### One command that gathers everything: `scripts/diagnose-oidc.sh`
+
+Instead of eyeballing JSON, run the bundled diagnostic. With AWS creds for the
+account the deploy role lives in (and, optionally, `gh` authed to the app repo):
+
+```bash
+scripts/diagnose-oidc.sh \
+  --repo <your-org>/<your-repo> \
+  --role-arn "$(gh secret list --repo <your-org>/<your-repo>)"   # or paste AWS_DEPLOY_ROLE_ARN's value
+# arg-free form (infers repo from `gh`, role from project.env) also works:
+scripts/diagnose-oidc.sh
+```
+
+It reconciles the **two sides that must agree** and prints a PASS/FAIL verdict:
+
+- **GitHub side** — the exact `sub`s the workflow will present
+  (`repo:<owner>/<repo>:pull_request` and `:ref:refs/heads/main`), plus whether
+  the `AWS_DEPLOY_ROLE_ARN` secret is set on the repo.
+- **AWS side** — current identity vs the role's account (catches account
+  mismatch), whether the `token.actions.githubusercontent.com` provider exists,
+  and the **live** trust policy's `aud` + `sub` patterns.
+- **Reconcile** — glob-matches each presented `sub` against the trust patterns.
+  A FAIL here is the "Not authorized" cause; it also flags the `your-org` /
+  `pr-preview` **placeholder** trust (deployed without `-c` flags) and prints the
+  exact `cdk deploy '*Cicd' -c githubOrg=… -c githubRepo=…` fix.
+
+Exit code is `0` (authorized) or non-zero (blocking failure), so it also works in
+CI. It **mutates nothing** — only `get-role`/`list-*`/`sts get-caller-identity`.
+
 #### Minimal OIDC smoke test (isolate the handshake)
 
 When the full `preview.yml` fails and you can't tell *why*, drop this standalone

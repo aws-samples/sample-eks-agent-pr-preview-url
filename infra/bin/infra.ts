@@ -34,6 +34,13 @@ const repoAllowlist = repoAllowlistRaw
 const trustWholeOrg =
   (app.node.tryGetContext('trustWholeOrg') ?? process.env.TRUST_WHOLE_ORG) === true ||
   (app.node.tryGetContext('trustWholeOrg') ?? process.env.TRUST_WHOLE_ORG) === 'true';
+// Immutable OIDC sub claims (post July 2026 GitHub repos). Comma-separated list
+// of sub claim patterns. Get yours from: repo Settings → Actions → OpenID Connect.
+// Example: -c oidcSubClaims="repo:user@123/repo@456:*,repo:user@123/repo2@789:*"
+const oidcSubClaimsRaw = app.node.tryGetContext('oidcSubClaims') ?? process.env.OIDC_SUB_CLAIMS;
+const oidcSubClaims = oidcSubClaimsRaw
+  ? String(oidcSubClaimsRaw).split(',').map((s) => s.trim()).filter(Boolean)
+  : undefined;
 // Cluster provisioner: 'eksctl' (recommended — Auto Mode node role works) or
 // 'cdk' (opt-in; see infra/lib/cluster-stack.ts and docs/runbook.md). Default eksctl.
 const clusterProvisioner = app.node.tryGetContext('clusterProvisioner') ?? 'eksctl';
@@ -80,6 +87,7 @@ const cicd = new CicdStack(app, stackId('Cicd'), {
   githubRepo,
   repoAllowlist,
   trustWholeOrg,
+  oidcSubClaims,
   projectName,
   ecrRepositoryName: `${projectName}/app`,
   databaseSecretArn: data.databaseSecretArn,

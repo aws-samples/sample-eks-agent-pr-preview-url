@@ -9,14 +9,14 @@
 #   PREVIEW_BASE_PATH    — /pr-<n> in path mode (bakes Next.js basePath → PR-specific image)
 
 # ---- deps: install node_modules from lockfile (cacheable across PRs) ----
-FROM node:22-alpine AS deps
+FROM public.ecr.aws/docker/library/node:22-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --no-audit --no-fund
 
 # ---- builder: next build (basePath baked here in path mode) ----
-FROM node:22-alpine AS builder
+FROM public.ecr.aws/docker/library/node:22-alpine AS builder
 WORKDIR /app
 ARG GIT_SHA=dev-local
 ARG PREVIEW_ROUTING_MODE=host
@@ -30,7 +30,7 @@ COPY . .
 RUN npm run build
 
 # ---- runner: minimal standalone runtime, non-root ----
-FROM node:22-alpine AS runner
+FROM public.ecr.aws/docker/library/node:22-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \

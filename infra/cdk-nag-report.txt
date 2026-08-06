@@ -1,0 +1,6 @@
+WARNING No cross-stack-reference strength configured, defaulting to "strong". We recommend you set feature flag "@aws-cdk/core:defaultCrossStackReferences" to "both", then deploy everywhere, then set it to "weak". Alternatively, set it to "strong" explicitly to lock in the current producer-protecting behavior. (See: https://github.com/aws/aws-cdk/blob/main/packages/aws-cdk-lib/README.md#reference-strength) (Construct Annotations)
+   PrPreviewData
+   Acknowledge with 'Construct-Annotations::@aws-cdk/core:crossStackReferencesDefaultStrong'
+Successfully synthesized to /Users/akmandi/Working/GenAI-App/Samplecode/eks-agent-pr-preview-url/infra/cdk.out
+Supply a stack id (PrPreviewNetwork, PrPreviewData, PrPreviewCicd) to display its template.
+76 feature flags are not configured. Run 'cdk flags --unstable=flags' to learn more.

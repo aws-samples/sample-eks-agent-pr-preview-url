@@ -19,6 +19,11 @@ export interface CicdStackProps extends cdk.StackProps {
   // in the org can assume this role — do NOT enable it for an org with untrusted
   // members. Default false. See SECURITY.md.
   trustWholeOrg?: boolean;
+  // Immutable OIDC sub claims (post July 2026 GitHub repos). When provided, these
+  // are used INSTEAD of the generated org/repo sub claims. Format:
+  //   ["repo:user@ID/repo@ID:*", ...]
+  // Get yours from: repo Settings → Actions → OpenID Connect.
+  oidcSubClaims?: string[];
   projectName: string;
   ecrRepositoryName: string;
   // Optional: the CI/CD stack does not consume the DB secret today (the deploy
@@ -63,21 +68,26 @@ export class CicdStack extends cdk.Stack {
       providerArn,
     );
 
-    // Build the set of trusted `repo:...` prefixes. SAFE DEFAULT = the single
-    // configured repo; widen to a caller-supplied allowlist; only trust the whole
-    // org when explicitly opted in (trustWholeOrg). In every case the ref is
-    // scoped to `:pull_request` runs + the `main` branch — NEVER a bare `*`
-    // (which would trust arbitrary refs). Fork PRs run with a read-only token
-    // that cannot assume this role regardless.
-    const repoScopes: string[] = props.trustWholeOrg
-      ? [`${props.githubOrg}/*`]
-      : (props.repoAllowlist && props.repoAllowlist.length > 0
-          ? props.repoAllowlist
-          : [`${props.githubOrg}/${props.githubRepo ?? props.projectName}`]);
-    const subClaims = repoScopes.flatMap((r) => [
-      `repo:${r}:pull_request`,
-      `repo:${r}:ref:refs/heads/main`,
-    ]);
+    // Build the set of trusted `repo:...` prefixes.
+    // POST JULY 2026: GitHub repos use immutable sub claims with numeric IDs
+    // (e.g. "repo:user@123/repo@456:*"). When `oidcSubClaims` is provided, it
+    // takes precedence over the legacy org/repo name-based generation.
+    // Get yours from: repo Settings → Actions → OpenID Connect.
+    let subClaims: string[];
+    if (props.oidcSubClaims && props.oidcSubClaims.length > 0) {
+      subClaims = props.oidcSubClaims;
+    } else {
+      // Legacy (pre July 2026) format: repo:org/repo:pull_request
+      const repoScopes: string[] = props.trustWholeOrg
+        ? [`${props.githubOrg}/*`]
+        : (props.repoAllowlist && props.repoAllowlist.length > 0
+            ? props.repoAllowlist
+            : [`${props.githubOrg}/${props.githubRepo ?? props.projectName}`]);
+      subClaims = repoScopes.flatMap((r) => [
+        `repo:${r}:pull_request`,
+        `repo:${r}:ref:refs/heads/main`,
+      ]);
+    }
 
     const deployRole = new iam.Role(this, 'GithubDeployRole', {
       roleName: `${props.projectName}-github-deploy`,

@@ -43,3 +43,18 @@ cdk.out/
 infra/cdk.out/
 .ash/ash_output/
 .wayfinder/
+
+# audit reports and scan results
+AWS-Holmes-scan-report-*.json
+npm-audit-*.json
+npm-audit-report.txt
+cdk-nag-report.txt
+npm-report.sh
+.protoshield/scans/
+
+# personal notes
+eks-agent-pr-preview-notes.txt
+
+# gitlab CI (not needed for github)
+.gitlab-ci.yml
+scripts/setup-gitlab-oidc.sh

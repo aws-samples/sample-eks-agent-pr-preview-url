@@ -52,8 +52,6 @@ cdk-nag-report.txt
 npm-report.sh
 .protoshield/scans/
 
-# personal notes
-eks-agent-pr-preview-notes.txt
 
 # gitlab CI (not needed for github)
 .gitlab-ci.yml

@@ -83,24 +83,46 @@ describe('CicdStack — ECR + scoped OIDC deploy role', () => {
       ImageScanningConfiguration: { ScanOnPush: true },
     });
   });
-  it('DEFAULT: scopes OIDC trust to the SINGLE repo (not org-wide, not bare *)', () => {
+  it('DEFAULT: scopes OIDC trust to the SINGLE repo in BOTH sub forms (not org-wide, not bare *)', () => {
     const roles = cicd.findResources('AWS::IAM::Role');
     const json = JSON.stringify(roles);
-    // Safe default: only the configured org/repo is trusted...
+    // Safe default: only the configured org/repo is trusted — legacy sub form...
     expect(json).toContain('repo:test-org/pr-preview:pull_request');
     expect(json).toContain('repo:test-org/pr-preview:ref:refs/heads/main');
-    // ...NOT the whole org, and never a bare wildcard.
+    // ...AND the post-2026-07-15 immutable form, so a repo created after the
+    // cutoff works with no extra config. Regression guard: a legacy-only trust
+    // fails AssumeRoleWithWebIdentity ("Not authorized") for such repos.
+    expect(json).toContain('repo:test-org@*/pr-preview@*:pull_request');
+    expect(json).toContain('repo:test-org@*/pr-preview@*:ref:refs/heads/main');
+    // NOT the whole org, and never a bare wildcard.
     expect(json).not.toContain('repo:test-org/*');
     expect(json).not.toMatch(/"token\.actions\.githubusercontent\.com:sub":\s*"\*"/);
-    // every sub is exactly pull_request or the main ref — nothing wider.
-    const subs = json.match(/repo:test-org\/[^"]+/g) ?? [];
+    // Every sub is one of exactly these four — nothing wider, all ref-scoped.
+    const subs = json.match(/repo:test-org[^"]+/g) ?? [];
+    const allowed = new Set([
+      'repo:test-org/pr-preview:pull_request',
+      'repo:test-org/pr-preview:ref:refs/heads/main',
+      'repo:test-org@*/pr-preview@*:pull_request',
+      'repo:test-org@*/pr-preview@*:ref:refs/heads/main',
+    ]);
     expect(subs.length).toBeGreaterThan(0);
-    for (const s of subs) {
-      expect(
-        s === 'repo:test-org/pr-preview:pull_request' ||
-        s === 'repo:test-org/pr-preview:ref:refs/heads/main',
-      ).toBe(true);
-    }
+    for (const s of subs) expect(allowed.has(s)).toBe(true);
+  });
+  it('ESCAPE HATCH: explicit oidcSubClaims replace the generated claims verbatim', () => {
+    const app = new cdk.App();
+    const net = new NetworkStack(app, 'N4', { env });
+    const clu = new ClusterStack(app, 'C4', { env, vpc: net.vpc, clusterName: projectName, projectName });
+    const pinned = 'repo:aws-samples@8931462/sample-eks-agent-pr-preview-url@1331347300:*';
+    const cicd4 = Template.fromStack(new CicdStack(app, 'Cicd4', {
+      env, githubOrg: 'test-org', githubRepo: projectName, projectName,
+      ecrRepositoryName: `${projectName}/app`, clusterName: clu.clusterName,
+      oidcSubClaims: [pinned],
+    }));
+    const json = JSON.stringify(cicd4.findResources('AWS::IAM::Role'));
+    expect(json).toContain(pinned);
+    // The generated org/repo claims must NOT also appear.
+    expect(json).not.toContain('repo:test-org/pr-preview:pull_request');
+    expect(json).not.toContain('repo:test-org@*/pr-preview@*:pull_request');
   });
   it('OPT-IN: trustWholeOrg widens to repo:org/* (still ref-scoped)', () => {
     const app = new cdk.App();
@@ -114,6 +136,9 @@ describe('CicdStack — ECR + scoped OIDC deploy role', () => {
     const json = JSON.stringify(cicd2.findResources('AWS::IAM::Role'));
     expect(json).toContain('repo:test-org/*:pull_request');
     expect(json).toContain('repo:test-org/*:ref:refs/heads/main');
+    // immutable whole-org: owner name pinned, org id + whole repo@id segment wildcarded
+    expect(json).toContain('repo:test-org@*/*:pull_request');
+    expect(json).toContain('repo:test-org@*/*:ref:refs/heads/main');
     expect(json).not.toMatch(/"token\.actions\.githubusercontent\.com:sub":\s*"\*"/);
   });
   it('OPT-IN: repoAllowlist trusts exactly the listed repos', () => {
@@ -128,6 +153,9 @@ describe('CicdStack — ECR + scoped OIDC deploy role', () => {
     const json = JSON.stringify(cicd3.findResources('AWS::IAM::Role'));
     expect(json).toContain('repo:test-org/app-a:pull_request');
     expect(json).toContain('repo:test-org/app-b:ref:refs/heads/main');
+    // immutable form for each listed repo
+    expect(json).toContain('repo:test-org@*/app-a@*:pull_request');
+    expect(json).toContain('repo:test-org@*/app-b@*:ref:refs/heads/main');
     expect(json).not.toContain('repo:test-org/*');
   });
   it('creates an EKS access entry when requested', () => {

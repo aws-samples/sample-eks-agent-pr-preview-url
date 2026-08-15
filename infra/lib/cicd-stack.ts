@@ -19,10 +19,13 @@ export interface CicdStackProps extends cdk.StackProps {
   // in the org can assume this role — do NOT enable it for an org with untrusted
   // members. Default false. See SECURITY.md.
   trustWholeOrg?: boolean;
-  // Immutable OIDC sub claims (post July 2026 GitHub repos). When provided, these
-  // are used INSTEAD of the generated org/repo sub claims. Format:
-  //   ["repo:user@ID/repo@ID:*", ...]
-  // Get yours from: repo Settings → Actions → OpenID Connect.
+  // ESCAPE HATCH — normally unnecessary. By default the trust already covers BOTH
+  // the legacy (`repo:org/repo:<ref>`) and the post-2026-07-15 immutable
+  // (`repo:org@<orgId>/repo@<repoId>:<ref>`) subject formats, so new and old repos
+  // both work without configuration. Set this only to pin exact claims, e.g.
+  //   ["repo:user@123/repo@456:*"]
+  // (copy from: repo Settings → Actions → OpenID Connect). When provided it
+  // REPLACES the generated claims entirely.
   oidcSubClaims?: string[];
   projectName: string;
   ecrRepositoryName: string;
@@ -68,25 +71,48 @@ export class CicdStack extends cdk.Stack {
       providerArn,
     );
 
-    // Build the set of trusted `repo:...` prefixes.
-    // POST JULY 2026: GitHub repos use immutable sub claims with numeric IDs
-    // (e.g. "repo:user@123/repo@456:*"). When `oidcSubClaims` is provided, it
-    // takes precedence over the legacy org/repo name-based generation.
-    // Get yours from: repo Settings → Actions → OpenID Connect.
+    // Build the set of trusted `repo:...` sub claims.
+    //
+    // GitHub has TWO subject formats, and which one a token carries depends on
+    // when the *app* repo was created:
+    //   legacy    : repo:<owner>/<repo>:<ref>
+    //   immutable : repo:<owner>@<ownerId>/<repo>@<repoId>:<ref>   (delimiter '@')
+    // Repos created (or renamed/transferred) after 2026-07-15 present the
+    // immutable form; older repos keep the legacy form until they opt in.
+    // See: github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens
+    //
+    // We emit BOTH forms so the deploy role works regardless of the app repo's
+    // age. A legacy-only trust silently fails `AssumeRoleWithWebIdentity` with
+    // "Not authorized" for any post-cutoff repo, even though the org/repo names
+    // look correct — a confusing failure this avoids by default.
+    //
+    // The immutable pattern keeps the owner/repo NAMES pinned and wildcards only
+    // the numeric ids GitHub appends: '@' can never appear in a GitHub owner or
+    // repo name, so `<owner>@*` matches only "<owner> followed by its id" — never
+    // a different owner. Refs stay scoped to PRs + main; never a bare `*`.
     let subClaims: string[];
     if (props.oidcSubClaims && props.oidcSubClaims.length > 0) {
+      // Explicit override: exact claims supplied by the operator (e.g. copied from
+      // repo Settings → Actions → OpenID Connect). Used verbatim.
       subClaims = props.oidcSubClaims;
     } else {
-      // Legacy (pre July 2026) format: repo:org/repo:pull_request
       const repoScopes: string[] = props.trustWholeOrg
         ? [`${props.githubOrg}/*`]
         : (props.repoAllowlist && props.repoAllowlist.length > 0
             ? props.repoAllowlist
             : [`${props.githubOrg}/${props.githubRepo ?? props.projectName}`]);
-      subClaims = repoScopes.flatMap((r) => [
-        `repo:${r}:pull_request`,
-        `repo:${r}:ref:refs/heads/main`,
-      ]);
+      // Immutable equivalent of a scope. `owner/*` needs no repo-id wildcard —
+      // the trailing `*` already spans the whole `<repo>@<repoId>` segment.
+      const immutableScope = (r: string): string => {
+        const slash = r.indexOf('/');
+        const owner = r.slice(0, slash);
+        const repo = r.slice(slash + 1);
+        return repo === '*' ? `${owner}@*/*` : `${owner}@*/${repo}@*`;
+      };
+      const refs = ['pull_request', 'ref:refs/heads/main'];
+      subClaims = repoScopes.flatMap((r) =>
+        [r, immutableScope(r)].flatMap((scope) => refs.map((ref) => `repo:${scope}:${ref}`)),
+      );
     }
 
     const deployRole = new iam.Role(this, 'GithubDeployRole', {

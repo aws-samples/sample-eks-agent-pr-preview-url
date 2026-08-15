@@ -88,12 +88,35 @@ cd .. && ./scripts/render-eksctl-config.sh                 # fills eksctl config
 eksctl create cluster -f eksctl/eksctl-cluster.rendered.yaml
 aws eks update-kubeconfig --name "$PROJECT_NAME" --region "$AWS_REGION"
 kubectl apply -f charts/preview-env/alb-ingressclass.yaml  # once per cluster
+
+# ⚠️ REQUIRED on the eksctl path — grant the deploy role Kubernetes RBAC. Without
+# this the workflow authenticates to AWS fine, then every helm/kubectl call fails
+# `Unauthorized`. (CDK does this automatically only on the pure-CDK cluster path.)
+ROLE_ARN="$(aws cloudformation describe-stacks --stack-name PrPreviewCicd \
+  --query "Stacks[0].Outputs[?OutputKey=='GithubDeployRoleArn'].OutputValue" --output text)"
+aws eks create-access-entry --cluster-name "$PROJECT_NAME" --region "$AWS_REGION" \
+  --principal-arn "$ROLE_ARN" --type STANDARD
+aws eks associate-access-policy --cluster-name "$PROJECT_NAME" --region "$AWS_REGION" \
+  --principal-arn "$ROLE_ARN" \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+  --access-scope type=cluster
+
+gh secret set AWS_DEPLOY_ROLE_ARN --repo "$GITHUB_ORG/<your-app>" --body "$ROLE_ARN"
 ./scripts/onboard-app.sh repo --repo "$GITHUB_ORG/<your-app>"   # scaffolds caller workflows
 ```
 
 Open a PR in your app repo → the reusable workflow builds, deploys, and comments
 the preview URL. Full walkthrough (incl. the **optional database**, the opt-in
 pure-CDK cluster, and **host-mode**): [`docs/runbook.md`](docs/runbook.md).
+
+> **OIDC subject formats are handled for you.** GitHub changed the default token
+> `sub` on **2026-07-15**: repos created (or renamed/transferred) after that date
+> send an *immutable* subject — `repo:<org>@<orgId>/<repo>@<repoId>:<ref>` — instead
+> of `repo:<org>/<repo>:<ref>`. The deploy role trusts **both** forms, so new and
+> old repos work with no extra config. If assume-role still fails, run
+> [`scripts/diagnose-oidc.sh`](scripts/diagnose-oidc.sh) — it reconciles the sub your
+> repo presents against the live trust and prints the fix. Details:
+> [`docs/github-actions.md`](docs/github-actions.md).
 
 ### 4. Drive the agent loop
 

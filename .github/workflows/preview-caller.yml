@@ -46,9 +46,11 @@ jobs:
       - name: Set image variables
         id: vars
         run: |
-          echo "image_tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          echo "pr_number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
-          echo "full_image=${{ steps.ecr-login.outputs.registry }}/${ECR_REPOSITORY}:sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          {
+            echo "image_tag=sha-${GITHUB_SHA::7}"
+            echo "pr_number=${{ github.event.pull_request.number }}"
+            echo "full_image=${{ steps.ecr-login.outputs.registry }}/${ECR_REPOSITORY}:sha-${GITHUB_SHA::7}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push Docker image
         run: |
@@ -101,7 +103,7 @@ jobs:
 
           # Discover ALB
           echo "Waiting for Ingress ALB address..."
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             ALB_HOST=$(kubectl get ingress -n "$NS" web \
               -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
             [ -n "$ALB_HOST" ] && break

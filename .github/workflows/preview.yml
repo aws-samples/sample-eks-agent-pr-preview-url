@@ -104,6 +104,13 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # Required for the registry build cache below. The runner's DEFAULT buildx
+      # driver is `docker`, which cannot export cache — without this the build
+      # fails with "Cache export is not supported for the docker driver."
+      # This sets up a `docker-container` driver so `cache-to type=registry` works.
+      - name: Set up Buildx (enables registry cache export)
+        uses: docker/setup-buildx-action@v3
+
       - name: Build & push image (path-mode bakes basePath)
         id: build
         uses: docker/build-push-action@v6

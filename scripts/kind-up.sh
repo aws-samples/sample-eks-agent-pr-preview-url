@@ -6,6 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CLUSTER=pr-preview
+KIND_KUBECONFIG="$ROOT/kubeconfig-kind.yaml"
 
 if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
   echo "[kind] cluster '$CLUSTER' already exists"
@@ -13,6 +14,14 @@ else
   echo "[kind] creating cluster '$CLUSTER'"
   kind create cluster --config "$ROOT/scripts/kind-cluster.yaml"
 fi
+
+# Write an isolated kubeconfig for this cluster and point this script's own
+# kubectl calls at it, instead of relying on whatever cluster the caller's
+# ambient KUBECONFIG/current-context happens to be set to. Without this, a
+# KUBECONFIG that omits the kind context (or a current-context left pointed
+# at a real cluster) sends `kubectl apply` below to that real cluster instead.
+kind get kubeconfig --name "$CLUSTER" > "$KIND_KUBECONFIG"
+export KUBECONFIG="$KIND_KUBECONFIG"
 
 echo "[kind] installing ingress-nginx"
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/kind/deploy.yaml
@@ -44,3 +53,6 @@ kubectl patch deployment metrics-server -n kube-system --type=json \
 
 echo "[kind] ready. Previews will be reachable at http://localhost:8080/pr-<n>/"
 echo "[kind] observability: 'kubectl top pods -n pr-<n>' once metrics-server is ready."
+echo "[kind] other scripts (preview-local.sh, etc.) use your ambient kubectl context, not this one."
+echo "[kind] before running them, point your shell at this cluster:"
+echo "[kind]   export KUBECONFIG=$KIND_KUBECONFIG:\$KUBECONFIG"
